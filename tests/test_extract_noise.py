@@ -63,3 +63,17 @@ def test_noise_is_detected(subject, email):
 )
 def test_real_work_is_never_called_noise(subject, email):
     assert not classify(subject, email, extract(subject, email), TRUST).is_noise
+
+
+def test_real_world_sample_from_the_live_api():
+    """First real ticket the API returned (bare store code, code repeated in the requester name)."""
+    got = extract("PM At OMNIMART M9GDCU 2ND MEKANZU DVR", "store.m9gdcu@omnimart.example", "OmniMart Rarsi (M9GDCU)")
+    assert (got.store_code, got.store_name, got.job_type) == ("M9GDCU", "Rarsi", "Maintenance")
+
+
+def test_store_code_is_found_from_the_requester_name_alone():
+    assert extract("DVR issue", "", "OmniMart Rarsi (M9GDCU)").store_code == "M9GDCU"
+
+
+def test_bare_code_is_removed_from_a_subject_derived_store_name():
+    assert extract("PM AT OMNIMART M9GDCU TARVENO", "", "").store_name == "Tarveno"

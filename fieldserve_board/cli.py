@@ -131,6 +131,7 @@ def sheet_main(argv: Optional[Sequence[str]] = None) -> int:
     apply = sub.add_parser("apply", help="type values into cells from a 'Ticket ID,Column,Value' CSV; never syncs")
     apply.add_argument("path")
     sub.add_parser("summary", help="print how many tickets are waiting on each person")
+    sub.add_parser("report", help="print a compact data-quality report (counts and samples) to tune heuristics")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
     _configure_logging(args.verbose)
@@ -150,6 +151,11 @@ def sheet_main(argv: Optional[Sequence[str]] = None) -> int:
                 for problem in problems:
                     print(f"warning: {problem}", file=sys.stderr)
                 return 2 if problems else 0
+            if args.command == "report":
+                from .report import report_for_backend
+
+                print(report_for_backend(backend))
+                return 0
             rows = backend.read_table(board.TICKETS)
             roster = Roster.from_sheet_rows(backend.read_table(board.ROSTER))
             for entry in workload(rows, roster):

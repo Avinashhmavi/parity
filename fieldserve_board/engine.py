@@ -77,6 +77,7 @@ class _Ticket:
     requester: str
     updated_at: str
     noise: str  # reason, or "" if operational
+    requester_name: str = ""
     null_fields: Set[str] = field(default_factory=set)
     # outcome
     final: Dict[str, str] = field(default_factory=dict)
@@ -190,13 +191,14 @@ class SyncEngine:
         return format_updated_since(stamp - timedelta(seconds=INCREMENTAL_OVERLAP_SECONDS))
 
     def _to_tracked(self, ticket: Ticket, roster: Roster) -> _Ticket:
-        info = extract(ticket.subject, ticket.requester_email)
+        info = extract(ticket.subject, ticket.requester_email, ticket.requester_name)
         verdict = classify(ticket.subject, ticket.requester_email, info, self.settings.trusted_domains)
         return _Ticket(
             id=ticket.id,
             values=board.api_values(ticket, roster),
             subject=ticket.subject,
             requester=ticket.requester_email,
+            requester_name=ticket.requester_name,
             updated_at=ticket.updated_at,
             noise=verdict.reason if verdict.is_noise else "",
             null_fields=set(ticket.null_fields),
@@ -235,6 +237,7 @@ class SyncEngine:
                 values=dict(snap["values"]),
                 subject=snap.get("subject", ""),
                 requester=snap.get("requester", ""),
+                requester_name=snap.get("requester_name", ""),
                 updated_at=snap.get("updated_at", ""),
                 noise=snap.get("noise", ""),
             )
@@ -388,6 +391,7 @@ class SyncEngine:
                 ticket.final,
                 subject=ticket.subject,
                 requester=ticket.requester,
+                requester_name=ticket.requester_name,
                 updated_at=ticket.updated_at,
                 roster=roster,
             )
@@ -434,6 +438,7 @@ class SyncEngine:
                 "values": values,
                 "subject": ticket.subject,
                 "requester": ticket.requester,
+                "requester_name": ticket.requester_name,
                 "updated_at": ticket.updated_at,
                 "noise": ticket.noise,
             }
@@ -459,7 +464,7 @@ class SyncEngine:
                     "Name": entry["name"],
                     "Role": entry["role"],
                     "Team": entry["team"],
-                    "Reports To": roster.by_id[entry["reports_to"]].name if entry["reports_to"] in roster.by_id else "",
+                    "Reports To": entry["reports_to"] or "",
                     "Engineers": engineers[i] if i < len(engineers) else "",
                     "Managers": managers[i] if i < len(managers) else "",
                 }

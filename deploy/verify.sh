@@ -5,6 +5,8 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 DC="sudo docker compose"
+# docker compose prints "Container ... Created" lines to stderr; hide those, keep real errors.
+quiet() { grep -v -E '^ ?Container |^ ?Network '; }
 FAILED=0
 step() { printf '\n== %s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*"; FAILED=1; }
@@ -25,13 +27,13 @@ else
 fi
 
 step "can the server reach the real FieldServe API? (response shapes, truncated)"
-$DC run --rm --no-deps -T board python3 sync.py --probe 2>&1 | head -c 3500 || fail "probe failed"
+$DC run --rm --no-deps -T board python3 sync.py --probe 2>&1 | quiet | head -c 1500 || fail "probe failed"
 
 step "one full sync"
-if $DC run --rm --no-deps -T board python3 sync.py 2>&1 | tail -n 3; then :; else fail "sync failed"; fi
+if $DC run --rm --no-deps -T board python3 sync.py 2>&1 | quiet | tail -n 3; then :; else fail "sync failed"; fi
 
 step "who each ticket is waiting on"
-$DC run --rm --no-deps -T board python3 sheet.py summary 2>&1 | head -n 20
+$DC run --rm --no-deps -T board python3 sheet.py summary 2>&1 | quiet | head -n 40
 
 step "result"
 [ "$FAILED" = 0 ] && echo "all checks passed" || { echo "some checks FAILED (see above)"; exit 1; }

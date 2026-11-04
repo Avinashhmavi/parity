@@ -313,3 +313,13 @@ def test_export_without_a_workbook_is_a_clear_error(tmp_path, monkeypatch, capsy
     code = sheet_main(["export", str(out)])
     # An empty board exports just the headers rather than crashing.
     assert code == 0 and out.read_text().startswith("Ticket ID,")
+
+
+def test_report_prints_counts_and_samples_not_the_dataset(rig, capsys, monkeypatch):
+    rig.sync()
+    monkeypatch.setenv("BOARD_XLSX_PATH", str(rig.xlsx))
+    monkeypatch.setenv("BOARD_STATE_PATH", str(rig.settings.state_path))
+    assert sheet_main(["report"]) == 0
+    text = capsys.readouterr().out
+    assert "TICKETS on board:" in text and "Most common subject shapes" in text and "Documents (valid link" in text
+    assert text.count("\n") < 120

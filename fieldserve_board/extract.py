@@ -56,39 +56,52 @@ class Extracted:
     store_code: str
     store_name: str
     job_type: str
-    store_code_source: str  # "subject" | "email" | "subject-bare" | ""
+    store_code_source: str  # "subject" | "name" | "email" | "subject-bare" | ""
 
 
-def store_code(subject: str, requester_email: str = "") -> tuple[str, str]:
-    """Return ``(code, source)``; code is upper-case or empty."""
+def store_code(subject: str, requester_email: str = "", requester_name: str = "") -> tuple[str, str]:
+    """Return ``(code, source)``; code is upper-case or empty.
+
+    Sources, in order of trust: a parenthesised code in the subject, one in the
+    requester *name* (the real data writes ``OmniMart Rarsi (M9GDCU)``), the
+    requester email, then a bare mixed letter+digit token in the subject.
+    """
     subject = subject or ""
     email_code = ""
     match = _EMAIL_CODE.match((requester_email or "").strip())
     if match:
         email_code = match.group(1).upper()
 
-    for m in _PAREN_CODE.finditer(subject):
-        code = m.group(1).upper()
-        # "(ALARMS)" is a word, not a store. All-letter codes are only
-        # believed when the requester email agrees.
-        if any(c.isdigit() for c in code) or code == email_code:
-            return code, "subject"
+    for source, text in (("subject", subject), ("name", requester_name or "")):
+        for m in _PAREN_CODE.finditer(text):
+            code = m.group(1).upper()
+            # "(ALARMS)" is a word, not a store. All-letter codes are only
+            # believed when the requester email agrees.
+            if any(c.isdigit() for c in code) or code == email_code:
+                return code, source
 
     if email_code:
         return email_code, "email"
 
-    bare = _BARE_CODE.search((subject or "").upper())
+    bare = _BARE_CODE.search(subject.upper())
     if bare:
         return bare.group(1), "subject-bare"
     return "", ""
 
 
-def store_name(subject: str) -> str:
+def store_name(subject: str, requester_name: str = "", code: str = "") -> str:
+    """Best-effort store name: from the requester name, else from the subject."""
+    if code:
+        named = re.match(
+            rf"^\s*(?:omnimart\s+)?(?P<n>.+?)\s*\(\s*{re.escape(code)}\s*\)\s*$", requester_name or "", re.IGNORECASE
+        )
+        if named and named.group("n").strip():
+            return " ".join(named.group("n").split()).title()
     match = _STORE_NAME.search(subject or "")
     if not match:
         return ""
-    name = " ".join(match.group("name").split())
-    return name.title()
+    words = [w for w in match.group("name").split() if w.upper() != code]
+    return " ".join(words).title()
 
 
 def job_type(subject: str) -> str:
@@ -99,9 +112,9 @@ def job_type(subject: str) -> str:
     return OTHER
 
 
-def extract(subject: str, requester_email: str = "") -> Extracted:
-    code, source = store_code(subject, requester_email)
-    return Extracted(code, store_name(subject), job_type(subject), source)
+def extract(subject: str, requester_email: str = "", requester_name: str = "") -> Extracted:
+    code, source = store_code(subject, requester_email, requester_name)
+    return Extracted(code, store_name(subject, requester_name, code), job_type(subject), source)
 
 
 def email_domain(email: Optional[str]) -> str:

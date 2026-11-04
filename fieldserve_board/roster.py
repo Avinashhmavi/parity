@@ -39,7 +39,7 @@ class Roster:
     def from_sheet_rows(cls, rows: Iterable[dict]) -> Roster:
         """Rebuild a roster from the Roster sheet (used when no API is at hand)."""
         return cls(
-            Agent(int(r["ID"]), r["Name"].strip(), r.get("Role", "").strip(), r.get("Team", "").strip())
+            Agent(int(r["ID"]), r["Name"].strip(), r.get("Role", "").strip(), r.get("Team", "").strip(), r.get("Reports To", "").strip())
             for r in rows
             if str(r.get("ID", "")).strip().isdigit() and str(r.get("Name", "")).strip()
         )

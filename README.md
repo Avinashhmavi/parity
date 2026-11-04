@@ -17,7 +17,9 @@ Two-way sync between the **FieldServe helpdesk API** and a **real spreadsheet** 
                                   React UI (JavaScript for the UI only)
 ```
 
-> **Verification status, read this first.** Everything below was verified against a local mock of the API built from the brief (`fieldserve_board/devtools/mock_api.py`). The live host (`http://13.233.55.184:8377`) was **not reachable** from the environment this was built in, so the real API's JSON envelope was never observed. The client reads the common shapes (a bare list, or `tickets` / `data` / `results` wrappers; requester under `requester.email`, `requester_email` or `email`; fields top-level or under `custom_fields`). Run `python3 sync.py --probe` once against the real API to confirm; see [Assumptions](#assumptions).
+> **Verification status.** The read path has run against the live API (1,007 tickets, 23 requests, from an AWS VPS). The write path has been verified against the local mock only until `deploy/live-check.sh` is run. Details of what the live API turned out to look like are under [Assumptions](#assumptions).
+>
+> *Original note, from before the live API was reachable:* Everything below was verified against a local mock of the API built from the brief (`fieldserve_board/devtools/mock_api.py`). The live host (`http://13.233.55.184:8377`) was **not reachable** from the environment this was built in, so the real API's JSON envelope was never observed. The client reads the common shapes (a bare list, or `tickets` / `data` / `results` wrappers; requester under `requester.email`, `requester_email` or `email`; fields top-level or under `custom_fields`). Run `python3 sync.py --probe` once against the real API to confirm; see [Assumptions](#assumptions).
 
 ## Quick start
 
@@ -156,7 +158,7 @@ The heuristics were written from the brief's description, not from the real data
 
 ## Assumptions
 
-1. **Response envelope and requester shape are unobserved** (see the verification note). Auth is HTTP Basic with the key as username, as in the brief.
+1. **Observed on the live API:** `/agents` and `/tickets` return a bare JSON list; each ticket carries `requester_name` and `requester_email` at the top level; `reports_to` on an agent is the manager's *name* (not an id); store codes appear bare in subjects (`PM At OMNIMART M9GDCU 2ND MEKANZU DVR`) and are repeated in `requester_name` (`OmniMart Rarsi (M9GDCU)`) and the email (`store.m9gdcu@omnimart.example`). The client still tolerates wrapped lists and `custom_fields`. Auth is HTTP Basic with the key as username.
 2. `PUT` accepts `null` to clear `engineer_id`/`manager`; document clears mirror whatever the API returned for empties (`null` vs `""`). A refusal is surfaced as `rejected` and the cell reverts.
 3. `updated_since` is inclusive (`>=`) or exclusive; either way the window logic re-reads the boundary second, so ties are safe.
 4. "Finance" is a single shared mailbox: the first Finance agent by name.
@@ -172,6 +174,11 @@ deploy/deploy.sh ~/keys/test.pem          # DEPLOY_HOST=ubuntu@host to override 
 ```
 
 It installs Docker if missing, uploads `git archive HEAD` (so no local secrets or untracked files travel), asks for the FieldServe key and a board password and writes them to `.env` **on the server** over ssh stdin (never on a command line or in the repo), builds, starts, and runs `verify.sh`, which checks the web app is up, the login is enforced, prints the API's real response shapes (`sync.py --probe`), runs one full sync, and prints the per-person summary.
+
+Afterwards, on the server (`ssh ... 'cd fieldserve-board && bash deploy/<script>'`):
+
+- `deploy/report.sh`: a compact data-quality report (counts and samples) for tuning the noise and extraction rules on the real data.
+- `deploy/live-check.sh`: verifies the **write** path against the real API by temporarily changing one ticket (document, status, engineer, both-sides-at-once, same-field conflict) and restoring it. Only run it on a dataset you may modify.
 
 The container publishes on the server's `127.0.0.1:8000` only. Reach it with `ssh -i key -L 8000:127.0.0.1:8000 ubuntu@host` and open `http://localhost:8000`.
 

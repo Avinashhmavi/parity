@@ -116,10 +116,11 @@ def build_row(
     requester: str,
     updated_at: str,
     roster: Roster,
+    requester_name: str = "",
 ) -> Dict[str, str]:
     """A full Tickets-sheet row, derived columns included."""
     evaluation = evaluate_values(ticket_id, values, roster)
-    info = extract(subject, requester)
+    info = extract(subject, requester, requester_name)
     row = {
         "Ticket ID": str(ticket_id),
         "Subject": subject,

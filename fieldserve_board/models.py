@@ -29,7 +29,7 @@ class Agent:
     name: str
     role: str
     team: str = ""
-    reports_to: Optional[int] = None
+    reports_to: str = ""  # the real API sends the manager's *name*, not an id
 
 
 @dataclass

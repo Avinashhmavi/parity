@@ -184,7 +184,7 @@ def parse_agent(raw: dict) -> Agent:
         name=_text(raw.get("name")).strip(),
         role=_text(raw.get("role")).strip(),
         team=_text(raw.get("team")).strip(),
-        reports_to=_int_or_none(raw.get("reports_to")),
+        reports_to=_text(raw.get("reports_to")).strip(),
     )
 
 
