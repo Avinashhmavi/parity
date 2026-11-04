@@ -1,100 +1,17 @@
-# Brings up the whole stack: MySQL, Redis, the API, a dedicated sync worker and
-# the dashboard behind nginx.
-#
-#   cp server/.env.example server/.env   # fill in the Google Sheets values
-#   docker compose up --build
-#
-# Dashboard: http://localhost:8080    API: http://localhost:4000/api/health
-
+# One container: FastAPI + the built UI. Board and sync state persist in ./data.
+#   cp .env.example .env   # set FIELDOPS_API_KEY
+#   docker compose up --build   ->   http://localhost:8000
 services:
-  mysql:
-    image: mysql:8.0
-    restart: unless-stopped
+  board:
+    build: .
+    env_file: .env
     environment:
-      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-parity}
-      MYSQL_DATABASE: ${DB_NAME:-parity}
+      BOARD_XLSX_PATH: /app/data/FieldServe_Board.xlsx
+      BOARD_STATE_PATH: /app/data/sync_state.json
+      SYNC_INTERVAL_SECONDS: "120"
     ports:
-      - '${DB_PORT:-3306}:3306'
+      # Published on localhost only: the console has no authentication.
+      - "127.0.0.1:8000:8000"
     volumes:
-      - mysql_data:/var/lib/mysql
-    healthcheck:
-      test: ['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '-p${DB_PASSWORD:-parity}']
-      interval: 5s
-      timeout: 5s
-      retries: 20
-      start_period: 30s
-
-  redis:
-    image: redis:7-alpine
+      - ./data:/app/data
     restart: unless-stopped
-    command: ['redis-server', '--appendonly', 'yes']
-    ports:
-      - '${REDIS_PORT:-6379}:6379'
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  server:
-    build:
-      context: ./server
-    restart: unless-stopped
-    env_file:
-      - path: ./server/.env
-        required: false
-    environment:
-      PORT: 4000
-      DB_HOST: mysql
-      DB_PORT: 3306
-      DB_USER: root
-      DB_PASSWORD: ${DB_PASSWORD:-parity}
-      DB_NAME: ${DB_NAME:-parity}
-      REDIS_URL: redis://redis:6379
-      # The worker service below owns job processing.
-      RUN_WORKER_INLINE: '0'
-    ports:
-      - '${PORT:-4000}:4000'
-    depends_on:
-      mysql:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  worker:
-    build:
-      context: ./server
-    restart: unless-stopped
-    command: ['node', 'queue/worker.js']
-    env_file:
-      - path: ./server/.env
-        required: false
-    environment:
-      DB_HOST: mysql
-      DB_PORT: 3306
-      DB_USER: root
-      DB_PASSWORD: ${DB_PASSWORD:-parity}
-      DB_NAME: ${DB_NAME:-parity}
-      REDIS_URL: redis://redis:6379
-    depends_on:
-      mysql:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  client:
-    build:
-      context: ./client
-      args:
-        VITE_API_URL: /api
-    restart: unless-stopped
-    ports:
-      - '${CLIENT_PORT:-8080}:80'
-    depends_on:
-      - server
-
-volumes:
-  mysql_data:
-  redis_data:

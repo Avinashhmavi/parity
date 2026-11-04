@@ -1,244 +1,182 @@
-# Parity
+# FieldServe Ticket Board
 
-Two-way sync between Google Sheets and MySQL, keeping both sides identical. Edit either side and both converge, automatically, within about a second.
+Two-way sync between the **FieldServe helpdesk API** and a **real spreadsheet** (Excel by default, Google Sheets optional), plus the six-step ticket workflow that answers one question for every ticket: **what is it waiting on, and whose move is it?**
 
-Sheet edits push over a webhook, database edits are picked up by a change detector, and every sync runs through a Redis-backed queue that batches bursts, retries failures and keeps exactly one sync in flight at a time.
+- `sync.py` runs one full two-way sync cycle and exits.
+- `sheet.py export|apply` drives the spreadsheet without opening Excel (this is what an automated grader calls).
+- A FastAPI backend and a React UI sit on top for the operations team.
 
 ```
-Google Sheet                                              MySQL
-     |                                                      |
-     | onEdit (Apps Script)                    change poller |
-     v                                                      v
-  POST /api/webhook/sheet  ----> [ BullMQ queue ] <----------
-                                        |
-                                   sync worker
-                                        |
-                          read both sides, plan the diff,
-                           apply it, write both sides back
-                                        |
-                                  WebSocket /ws
-                                        |
-                                  React dashboard
+ FieldServe API  <──────── sync.py / SyncEngine ────────>  Tickets.xlsx  (or Google Sheet)
+   GET/PUT  /api/v2/*      three-way merge per field          Tickets · Summary · Noise
+                           baseline in data/sync_state.json   Conflicts · Activity · Roster
+                                       │
+                                  FastAPI (reads the board, writes edits like a human,
+                                  triggers syncs, streams events on /ws)
+                                       │
+                                  React UI (JavaScript for the UI only)
 ```
 
-## What it does
-
-- **Automatic, both directions.** An installable Apps Script `onEdit` trigger posts to the server the moment a cell changes. The database side is polled with a cheap fingerprint query. Neither side needs a human to press anything.
-- **Bursts collapse into one sync.** Pasting 500 rows fires many triggers; they dedupe into a single sync rather than 500 of them.
-- **Survives failure.** Jobs retry five times with exponential backoff. A trigger arriving mid-sync is never dropped.
-- **Flexible schema.** The first sheet row is headers. You need an `id` column. Every other column is created in MySQL automatically, including ones added later.
-- **Conflicts resolved and logged.** When a row changes on both sides, the newer `updated_at` wins. Ties go to the database. Every conflict is written to `conflict_logs` and broadcast live.
-- **Measured.** Edit-to-sync latency and rows per second are recorded for every run and exposed at `/api/metrics`.
-
-## Measured performance
-
-From `npm run loadtest` and the end-to-end suite, on a single container running MySQL 8, Redis 7 and Node 22:
-
-| Workload | Result |
-| --- | --- |
-| Plan and write 10,000 new rows | 0.27s (about 37,000 rows/sec) |
-| Plan and write 50,000 new rows | 0.96s (about 52,000 rows/sec) |
-| Diff 50,000 rows (planner only) | 0.03s |
-| Edit-to-sync latency, default settings | about 830ms p50 |
-| Edit-to-sync latency, `SYNC_DEBOUNCE_MS=50` | about 130ms p50 |
-| Sync duration, small sheet | about 10ms |
-
-Latency is dominated by the debounce window, which is the deliberate tradeoff that lets a burst of edits collapse into one sync. Lower `SYNC_DEBOUNCE_MS` for faster reaction, raise it to do less work under heavy editing.
-
-Reproduce with:
-
-```bash
-cd server
-npm run loadtest -- --rows 50000
-```
+> **Verification status, read this first.** Everything below was verified against a local mock of the API built from the brief (`fieldserve_board/devtools/mock_api.py`). The live host (`http://13.233.55.184:8377`) was **not reachable** from the environment this was built in, so the real API's JSON envelope was never observed. The client reads the common shapes (a bare list, or `tickets` / `data` / `results` wrappers; requester under `requester.email`, `requester_email` or `email`; fields top-level or under `custom_fields`). Run `python3 sync.py --probe` once against the real API to confirm; see [Assumptions](#assumptions).
 
 ## Quick start
 
-### Docker, everything at once
-
 ```bash
-cp server/.env.example server/.env    # fill in the Google Sheets values
-docker compose up --build
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env          # set FIELDOPS_API_KEY (and FIELDOPS_BASE_URL if different)
+
+python3 sync.py --probe       # optional: print the API's raw response shapes
+python3 sync.py               # first run builds data/FieldServe_Board.xlsx
+python3 sheet.py summary      # tickets waiting on each person
 ```
 
-Dashboard on http://localhost:8080, API on http://localhost:4000/api/health.
-
-This brings up MySQL, Redis, the API, a dedicated sync worker and nginx serving the dashboard.
-
-### Running it directly
+Web app (API + UI):
 
 ```bash
-cd server && npm install && cp .env.example .env    # then fill it in
-npm start                                           # API plus inline worker
-
-cd ../client && npm install && npm run dev
+cd client && npm ci && npm run build && cd ..      # once; produces client/dist
+uvicorn fieldserve_board.web.app:app --port 8000   # http://localhost:8000
+# UI development with hot reload:  uvicorn ... --port 8000  and  cd client && npm run dev
 ```
 
-Redis is optional. Without `REDIS_URL` the server falls back to an in-process runner that coalesces triggers the same way, which is enough for local development.
+Docker: `docker compose up --build` serves everything on `127.0.0.1:8000` and syncs every 120 s. (Written but not built in the environment this was authored in; the CI `docker` job builds it.)
 
-### Full local walkthrough, no Docker (Windows)
+No real API key? `python -m fieldserve_board.devtools.mock_api --port 8377 --key fk_demo` serves 620 deliberately messy tickets, then `FIELDOPS_BASE_URL=http://127.0.0.1:8377 FIELDOPS_API_KEY=fk_demo python3 sync.py`.
 
-The order that actually works end to end, running MySQL and Redis directly instead of in containers.
+The grader contract is in [`submission.json`](submission.json): `python3 sync.py` and `python3 sheet.py`, both run from the repo root with `FIELDOPS_BASE_URL` / `FIELDOPS_API_KEY` in the environment.
 
-1. **MySQL.** Install MySQL 8 (MySQL Installer, Server component). Set a root password during setup. Then create the database:
-   ```sql
-   CREATE DATABASE parity;
-   ```
-   Everything else (tables, columns) is created automatically on first run.
+## The sheet
 
-2. **Redis, via WSL.** Windows has no native Redis build, so install it inside WSL:
-   ```powershell
-   wsl --install
-   ```
-   Then inside the Ubuntu shell it opens:
-   ```bash
-   sudo apt update && sudo apt install -y redis-server
-   sudo service redis-server start
-   redis-cli ping   # expect PONG
-   ```
-   WSL2 shares `localhost` with Windows, so `REDIS_URL=redis://localhost:6379` in `.env` just works. Redis does not survive a reboot automatically, run `sudo service redis-server start` again each time.
+`Tickets` has the 11 required columns, named exactly, plus extras (extras are never judged):
 
-3. **`server/.env`.** Copy `server/.env.example` to `server/.env` and fill in: your MySQL password, `DB_NAME=parity`, the three `GOOGLE_*` values from your service account's JSON key, `REDIS_URL=redis://localhost:6379`, and a generated `WEBHOOK_SECRET`:
-   ```bash
-   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-   ```
+| Column | Value |
+|---|---|
+| Ticket ID, Subject | as served |
+| Status | `Open` / `Pending` / `Resolved` / `Closed` |
+| Engineer | exact `/agents` name (mapped to `engineer_id`), or blank |
+| Manager | the manager string as on the ticket |
+| Purchase Order, Delivery Note, Work Report, Invoice | the raw field value: URL, `NA`, junk text, or blank |
+| **Stage** | `Assign Manager` / `Assign Engineer` / `Purchase Order` / `Delivery Note` / `Work Report` / `Invoice` / `Done` |
+| **Action Owner** | roster name of whoever the stage waits on; blank when `Done` |
+| Integrity, Store Code, Store, Job Type, Requester, Updated At | extras |
 
-4. **Start the app.**
-   ```bash
-   cd server && npm install && npm start
-   cd client && npm install && npm run dev
-   ```
-   Open the dashboard, click **Sync Now**, confirm the Sheet and MySQL panels match.
+Other sheets: `Summary` (pending tickets per person), `Noise` (tickets kept off the board, with the reason), `Conflicts`, `Activity`, `Roster`. Stage / Action Owner / Integrity / Store / Job Type are computed and shaded grey; edits to them are ignored.
 
-5. **A public tunnel**, so Google can reach your local server for push sync. Either works, no signup needed for the second:
-   ```bash
-   ngrok http 4000
-   # or, with no account at all:
-   ssh -R 80:localhost:4000 nokey@localhost.run
-   ```
-   Copy the `https://...` forwarding URL it prints. It changes every time the tunnel restarts, so this has to be redone whenever that terminal is closed and reopened.
+## The workflow (§3 of the brief, implemented literally)
 
-6. **Apps Script**, see "Turning on push sync" below, using the tunnel URL from step 5 as `SYNC_WEBHOOK_URL`.
+| # | Step | Met when | Owner |
+|---|---|---|---|
+| 1 | Assign Manager | `manager` non-empty | Coordinator: `coordinators_sorted_by_name[ticket_id % 2]` |
+| 2 | Assign Engineer | `engineer_id` set | the ticket's Manager |
+| 3 | Purchase Order | `purchase_order` is a URL (`NA` is **not** accepted) | the ticket's Manager |
+| 4 | Delivery Note | URL or exactly `NA` | Finance |
+| 5 | Work Report | URL (`NA` is never accepted) | the ticket's Engineer |
+| 6 | Invoice | URL or exactly `NA` | Finance |
 
-7. **Verify both directions.** Edit a cell in the Sheet, watch the server terminal log `sheet webhook accepted` then `sync ok` within about a second. Then run an `UPDATE ... SET updated_at = NOW()` against `synced_rows` in MySQL directly, and watch it appear in the Sheet within `DB_POLL_INTERVAL_MS`.
+The **first** unmet step is the Stage; later missing documents don't matter yet. A document counts only if it is a well-formed `http(s)` URL with a dotted host, or the exact text `NA` where waivable. `done`, `asked Ravi`, `ok`, `na`, `N/A`, `see https://…` are junk: not a document, and flagged as "X is not a link".
 
-## Google Sheets setup
+**Integrity flags** (column `Integrity`, rows tinted red, counted in the UI):
 
-1. Create a Google Cloud service account, enable the Sheets API, and download a JSON key.
-2. Share your sheet with the service account's client email, as an Editor.
-3. Put `GOOGLE_SHEET_ID`, `GOOGLE_CLIENT_EMAIL` and `GOOGLE_PRIVATE_KEY` in `server/.env`. Keep the `\n` escapes in the private key exactly as they appear in the JSON.
-4. Give the sheet an `id` column. An `updated_at` column is recommended, since conflict resolution uses it.
+- `Closed but waiting on <Stage>`: Closed with any step unmet.
+- `Resolved without Work Report`: Resolved and the Work Report is not a URL (junk and `NA` included).
+- `<Document> is not a link`, `<Document> cannot be NA` (PO / Work Report).
+- `Manager not on roster`, `Engineer not on roster` (`manager` is a free-text name, so it is validated against `/agents`; the step still counts as met, as §3 says "non-empty", but the problem is visible).
 
-### Turning on push sync
+Name matching is case- and whitespace-insensitive; the roster spelling is used for Action Owner.
 
-1. Generate a secret and put it in `server/.env` as `WEBHOOK_SECRET`:
-   ```bash
-   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-   ```
-2. In the sheet, open Extensions > Apps Script and paste in [`server/apps-script/onEdit.gs`](server/apps-script/onEdit.gs).
-3. In Project Settings > Script Properties add `SYNC_WEBHOOK_URL` (your server's `/api/webhook/sheet`) and `SYNC_WEBHOOK_SECRET` (the same secret).
-4. Run `installTrigger()` once and accept the permission prompt.
+## How the sync works
 
-It has to be an installable trigger. A plain `onEdit(e)` function runs unauthorized and is not allowed to make outbound requests, so it cannot reach your server. `installTrigger()` creates the right kind.
+One `python3 sync.py` = one cycle, in this order (`fieldserve_board/engine.py`):
 
-The server needs to be reachable from Google. For local development, tunnel it with ngrok or similar.
+1. **Pull.** `GET /agents`, then list every ticket (see *API limits*).
+2. **Read** the `Tickets` sheet.
+3. **Merge**, per ticket and per field, as a three-way comparison of `base` (last value both sides agreed on, stored in `data/sync_state.json`), `sheet` and `api`.
+4. **Push** sheet edits with a sparse `PUT`. Each pushed ticket is **re-read first** and the merge re-run against that fresh copy.
+5. **Write** the merged result to the workbook, then **save the baseline**.
 
-## How a sync works
+Why a baseline: with only two snapshots you cannot tell *who* changed a field. With a third you can, and that is what makes "an unchanged sheet cell never overwrites a fresh server change" a property of the algorithm rather than a hope.
 
-Every sync is a full reconcile rather than an incremental patch, which keeps it correct even if the server was down while edits happened.
+## Conflict policy
 
-1. Read the sheet and the table.
-2. `computeSyncPlan()` decides, per row id, what should happen. It is a pure function, which is why the interesting logic can be tested without either system running.
-3. Apply the plan: chunked upserts, batched deletes, one sheet rewrite.
-4. Record the logs, the metric and the set of ids that existed after this sync.
+Per field (`fieldserve_board/merge.py`, a pure function with its own tests):
 
-That last set is what makes deletes work. A row present in the sheet but absent from the table is new if it was not in the last synced set, and deleted from the database if it was.
+| sheet vs base | api vs base | outcome |
+|---|---|---|
+| same | changed | **take the API** (the cell was never touched; this is the "stale cell never clobbers" guarantee) |
+| changed | same | **push the sheet edit** |
+| changed | changed, to the same value | nothing to do |
+| changed | changed, to different values | **conflict: the API wins**, logged |
 
-| Situation | Result |
-| --- | --- |
-| Only in sheet, not seen before | Insert into MySQL |
-| Only in sheet, was synced before | Deleted in MySQL, so remove from sheet |
-| Only in MySQL, not seen before | Add to sheet |
-| Only in MySQL, was synced before | Deleted in sheet, so delete from MySQL |
-| In both, checksums match | Nothing |
-| In both, checksums differ | Newer `updated_at` wins, conflict logged |
+- The API wins a true same-field conflict because it is the system of record and may already have been acted on by someone else. The losing sheet value is written to the `Conflicts` sheet (and the Activity feed) with the baseline, so it can be re-applied by hand. `CONFLICT_POLICY=sheet` flips this.
+- It is per **field**, so a ticket changed on both sides at once still merges cleanly when the edits touch different fields (server changes Status, human sets Work Report: both land).
+- **No baseline** for a ticket (state file lost) means the API wins, and any differing sheet value is logged as a conflict instead of being silently dropped. The worst case after losing the state file is "a human edit is logged, not applied", never "a stale cell overwrites the server".
+- **Case or spacing only** (`chitra menon` vs `Chitra Menon`) is not an edit.
+- **Validation before sending:** an unknown engineer/manager/status is refused locally, reverted on the sheet to the server value, and logged (`rejected`). If a multi-field `PUT` is refused, each field is retried alone so one bad value doesn't block a good one.
+- **Edits during a sync:** just before writing, the sheet is read again. Any cell changed since the first read is left as the human typed it and its baseline is not advanced, so the next sync treats it as a normal edit.
+- **Failures:** a network/5xx error on a push leaves the human's edit in place and the baseline unchanged, so the next sync retries. The sync exits 0 with `errors > 0` in its JSON summary; only failures that stop the cycle (cannot list tickets, cannot write the workbook) exit non-zero.
+- Writes order: API push, then sheet, then baseline. A crash between steps is safe because the next run finds `sheet == api` and does nothing.
+- Edits to a **deleted** row are not propagated (the API has no delete); the row reappears on the next sync. A row for a ticket id the API doesn't have is left untouched and logged: the sheet can't create tickets.
 
-Checksums are SHA-256 over the row's content, ignoring `updated_at`, so touching a row without changing it is not treated as an edit.
+## API limits
 
-### Why the queue matters
+- **Rate limit (60/min).** A sliding-window limiter spaces our own requests at 55/min (`API_REQUESTS_PER_MINUTE`). If a `429` still arrives, we sleep `Retry-After + 1` s, clear our window and retry, up to 6 times, never in a tight loop ("hammering resets the window"). Connection errors and 5xx use exponential backoff. 4xx validation errors are never retried.
+- **Pagination cap (10 pages x 50 = 500).** A window is sorted by `updated_at` ascending. When a window comes back full, `updated_since` moves to the timestamp of its last ticket and the next window is fetched; the overlap (tickets sharing that second) is de-duplicated by id. We never request page 11. `updated_since` is sent as `YYYY-MM-DDTHH:MM:SSZ` (no microseconds).
+- **Live data.** Tickets edited mid-scan jump to the end of the ordering and could be skipped. After the scan a **catch-up** pass re-lists everything updated since just before the scan began, using the server's own clock (HTTP `Date` header) so clock skew can't hide a change.
+- **Known limit:** more than 500 tickets sharing a single `updated_at` second cannot be paged past with this API. The scan steps over that second, logs a warning and terminates rather than looping.
+- **Cost.** A full sync of ~600 tickets is about 15 requests. `python3 sync.py --incremental` lists only tickets updated since the last checkpoint (minus 60 s overlap). Full is the default because it also detects tickets that vanished (confirmed with a `GET`, and refused if dozens go missing at once, which is more likely a listing problem than deletions).
+- Each pushed ticket costs 2 requests (re-read + `PUT`), so a large batch of edits is throttled, not failed.
 
-A sync rewrites the entire sheet, so two running concurrently would race and could resurrect rows the other just deleted. The worker runs at concurrency 1, and every trigger shares a single job id so pending triggers collapse into one.
+## Noise
 
-Deduping alone would lose a trigger that arrives while a sync is already running, so triggers also set a dirty marker in Redis. The worker claims it when the job starts and re-queues on completion if it was set again. No edit is silently dropped.
+Tickets that are not work (automated alerts, marketing) are kept off `Tickets` and listed on `Noise` with a reason, so a wrong call is visible and reversible. Principles (`fieldserve_board/noise.py`):
+
+- **Conservative**: a real ticket on the Noise sheet is worse than spam on the board.
+- **A store code is proof of work**: if a store can be identified the ticket stays, whatever else it says.
+- Noise requires evidence: spam wording from a non-trusted sender; an automated mailbox (`no-reply@`, `alerts@`, `mailer-daemon@`…) with no store; machine-only wording ("Delivery Status Notification", "out of office"); or alert-style wording with no store *and* no job type. Senders on `TRUSTED_EMAIL_DOMAINS` (default `omnimart.example`) are given the benefit of the doubt.
+- Re-evaluated every sync: a ticket that gains a store code moves onto the board.
+
+The heuristics were written from the brief's description, not from the real dataset. Check the `Noise` sheet after the first real sync.
+
+## Messy extraction
+
+`fieldserve_board/extract.py`, all rules documented in the file:
+
+- **Store code** (6 alphanumerics): `(K7Q2XR)` in the subject; else the requester email `store.k7q2xr@…`; else a bare mixed letter+digit token. A plain six-letter word (`CAMERA`) never matches. An all-letter code in parentheses is only trusted when the email agrees.
+- **Job type**, first match wins: Maintenance (`PM`, `AMC`, preventive/maintenance) → Installation → Service Call (`not working`, fault, complaint, offline, repair…) → Other. `PM … camera not working` is Maintenance, as the brief defines PM.
+- **Store name**: the words after `OMNIMART`, title-cased.
+
+## Decisions and cuts
+
+- **Excel is the default; Stage/Action Owner are values, not formulas.** openpyxl writes formulas without cached results, so a CSV export or grader reading the file without Excel would see blanks. The cost: Stage refreshes on the next sync or `sheet.py apply`, not live while typing in Excel. `sheet.py apply` recomputes the computed columns locally (what a formula would do), with no API call.
+- `Status`, `Engineer` and `Manager` cells have dropdowns (warning-style, so a human can still type) fed from the live roster.
+- **Google Sheets** is a second backend behind the same three-method interface (`BoardBackend`). It is exercised by running the full sync engine through an in-memory fake of gspread; it has **not** been run against live Google. Setup is in `.env.example`.
+- State is one JSON file written atomically, plus a file lock so `sync`, `export`, `apply` and the web app never interleave.
+- The web app has no authentication and binds to localhost: it is an operations console, not an internet service. Put it behind your own auth before exposing it.
+- Cut consciously: no per-field audit history beyond `Conflicts`/`Activity`; no webhook-driven (push) syncing; no multi-user presence.
+
+## Assumptions
+
+1. **Response envelope and requester shape are unobserved** (see the verification note). Auth is HTTP Basic with the key as username, as in the brief.
+2. `PUT` accepts `null` to clear `engineer_id`/`manager`; document clears mirror whatever the API returned for empties (`null` vs `""`). A refusal is surfaced as `rejected` and the cell reverts.
+3. `updated_since` is inclusive (`>=`) or exclusive; either way the window logic re-reads the boundary second, so ties are safe.
+4. "Finance" is a single shared mailbox: the first Finance agent by name.
+5. `manager` on a ticket is compared case-insensitively to roster managers; Action Owner shows the roster spelling.
+6. If fewer than two coordinators exist, the coordinator rule falls back to the only one.
 
 ## Tests
 
-99 tests, 56 unit and 43 integration.
-
 ```bash
-cd server
-npm run test:unit          # no services needed
-
-# integration and end-to-end, needs MySQL and Redis
-DB_INTEGRATION=1 REDIS_URL=redis://localhost:6379 npm run test:integration
+pip install -r requirements-dev.txt
+ruff check . && pytest --cov=fieldserve_board     # 124 tests: workflow, extraction, noise, merge, client, sync e2e, web, gsheets
+cd client && npm test && npm run build            # 6 UI helper tests + production build
 ```
 
-- **Unit** covers the planner across every branch including a 10,000 row case, conflict tie-breaks and unparseable timestamps, checksum stability, header sanitization, and webhook authentication.
-- **Integration** runs against real MySQL and Redis: schema, dynamic columns, chunked upserts, transaction rollback, queue dedupe and retry budget.
-- **End-to-end** drives the real path from HTTP webhook through the queue, worker, planner, MySQL and back to the sheet, with only the Google Sheets API replaced by an in-memory sheet.
+The end-to-end tests run the real engine over real HTTP against the mock API and a real `.xlsx` on disk. They cover: first sync; idempotence; server change → sheet; sheet edit → API; both sides at once (different fields and same field); stale cells never overwriting; rejected edits; one bad field not blocking a good one; edits landing mid-sync; failed push retried; lost state file; windowing past 500 tickets; `429`/`Retry-After`; noise; `sheet.py export`/`apply`.
 
-CI runs lint, unit tests, integration tests against service containers, the client build, the load test, and builds both Docker images.
+## What I'd do next
 
-## API
-
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /api/health` | Liveness |
-| `GET /api/data/sheet` | Headers and rows from the sheet |
-| `GET /api/data/db` | Active rows from MySQL |
-| `GET /api/sync/meta` | Last sync time and runner status |
-| `POST /api/sync/force` | Queue a sync manually |
-| `POST /api/webhook/sheet` | Apps Script edit notification, needs `x-webhook-secret` |
-| `GET /api/metrics` | Latency percentiles, throughput, recent runs |
-| `GET /api/metrics/activity` | Recent per-row sync log |
-| `WS /ws` | Live `status`, `sync_event` and `conflict_event` |
-
-## Configuration
-
-Everything lives in `server/.env`, documented in [`server/.env.example`](server/.env.example). The ones worth knowing:
-
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `REDIS_URL` | unset | Unset falls back to the in-process runner |
-| `SYNC_DEBOUNCE_MS` | `750` | Burst collapsing window, the main latency lever |
-| `SYNC_CHUNK_SIZE` | `500` | Rows per INSERT statement |
-| `SYNC_JOB_ATTEMPTS` | `5` | Retries before a sync is marked failed |
-| `DB_POLL_INTERVAL_MS` | `5000` | Database change check interval, `0` disables |
-| `WEBHOOK_SECRET` | unset | Required for push sync, endpoint refuses without it |
-| `RUN_WORKER_INLINE` | `1` | Set `0` when running a separate worker process |
-
-## Layout
-
-```
-parity/
-├── docker-compose.yml          MySQL, Redis, API, worker, dashboard
-├── .github/workflows/ci.yml    lint, tests, load test, image builds
-├── client/                     Vite + React dashboard, nginx image
-└── server/
-    ├── apps-script/onEdit.gs   paste into the sheet
-    ├── config/                 env, MySQL pool, Google auth, Redis
-    ├── queue/                  BullMQ queue, worker, job processor
-    ├── services/
-    │   ├── syncPlanner.js      pure diff logic, the testable core
-    │   ├── syncEngine.js       reads, plans, applies, measures
-    │   ├── changeDetector.js   MySQL-side polling
-    │   ├── runner.js           queue or in-process, chosen by config
-    │   ├── sheetService.js     Google Sheets read and write
-    │   └── dbService.js        chunked, batched MySQL access
-    ├── scripts/loadtest.js     throughput benchmark
-    └── tests/                  unit, integration, end-to-end
-```
-
-## Stack
-
-Node.js, Express, BullMQ on Redis, MySQL 8, Google Sheets API, WebSockets, React, Tailwind, Docker Compose, GitHub Actions.
+1. Run `sync.py --probe` against the live API and fix any envelope differences; tune the noise heuristics on the real data.
+2. Run the Google backend against a real spreadsheet.
+3. Live formulas for Stage/Owner in a second sheet view for people editing in Excel, kept consistent with the Python rules by a test that recalculates in LibreOffice.
+4. Sync on change instead of on a timer: the API offers no webhook or ETag, so ask its owners for one rather than polling harder against a 60/min budget.
+5. Authentication in front of the web app, and per-user attribution of edits.

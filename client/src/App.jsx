@@ -1,391 +1,129 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, Database, Sheet, RefreshCw } from 'lucide-react'
-import './App.css'
+import { useCallback, useEffect, useState } from 'react'
+import { api } from './api.js'
+import { useResource, useServerEvents, useUrlState } from './hooks.js'
+import { buildQuery } from './lib.js'
+import { ActivityView } from './components/Activity.jsx'
+import { Board } from './components/Board.jsx'
+import { Drawer } from './components/Drawer.jsx'
+import { Rail } from './components/Rail.jsx'
+import { Workload } from './components/Workload.jsx'
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000/api'
-
-// Behind the nginx proxy the socket is same-origin, so derive it from the page
-// rather than hardcoding a host. Falls back to the dev server port.
-function resolveWsUrl() {
-  if (import.meta.env.VITE_WS_URL) {
-    return import.meta.env.VITE_WS_URL
-  }
-  if (API_BASE_URL.startsWith('/')) {
-    const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    return `${scheme}//${window.location.host}/ws`
-  }
-  return 'ws://localhost:4000/ws'
+const TITLES = {
+  board: ['Ticket Board', 'Every ticket, the step it is stuck on, and whose move it is.'],
+  workload: ['Workload', 'How many tickets are waiting on each person right now.'],
+  integrity: ['Integrity', 'Tickets marked Closed or Resolved whose paperwork says otherwise, and documents that are not links.'],
+  activity: ['Activity', 'What the sync pushed, what it refused, and every time both sides disagreed.']
 }
 
-const WS_URL = resolveWsUrl()
+export default function App() {
+  const [state, update] = useUrlState()
+  const [refreshKey, setRefreshKey] = useState(0)
+  const [syncing, setSyncing] = useState(false)
+  const [toasts, setToasts] = useState([])
 
-// "4:39:12 PM, 9 Sep 2026" in the viewer's local time, matching the sheet.
-function formatReadable(value) {
-  const date = value instanceof Date ? value : new Date(value)
-  if (Number.isNaN(date.getTime())) return String(value ?? '')
-  const time = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' })
-  const day = date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
-  return `${time}, ${day}`
-}
-
-// id first, data columns next, bookkeeping last, matching the sheet and MySQL.
-const TRAILING_COLUMNS = ['updated_at', 'deleted']
-function orderColumns(keys, keyOf = k => k) {
-  const id = keys.filter(k => keyOf(k) === 'id')
-  const data = keys.filter(k => keyOf(k) !== 'id' && !TRAILING_COLUMNS.includes(keyOf(k)))
-  const trailing = TRAILING_COLUMNS.flatMap(t => keys.filter(k => keyOf(k) === t))
-  return [...id, ...data, ...trailing]
-}
-
-// Connects once for the component's lifetime. The handler is read through a
-// ref: depending on it directly would tear down and reopen the socket on every
-// render, and each close scheduled a reconnect, so sockets piled up.
-function useWebSocket(onMessage) {
-  const handlerRef = useRef(onMessage)
-  handlerRef.current = onMessage
-
-  useEffect(() => {
-    let socket
-    let reconnectTimer
-    let disposed = false
-
-    function connect() {
-      socket = new WebSocket(WS_URL)
-      socket.onmessage = event => {
-        try {
-          handlerRef.current(JSON.parse(event.data))
-        } catch (e) {}
-      }
-      socket.onclose = () => {
-        if (!disposed) {
-          reconnectTimer = setTimeout(connect, 2000)
-        }
-      }
-    }
-
-    connect()
-    return () => {
-      disposed = true
-      clearTimeout(reconnectTimer)
-      if (socket) {
-        socket.close()
-      }
-    }
-  }, [])
-}
-
-function App() {
-  const [sheetData, setSheetData] = useState({ headers: [], rows: [] })
-  const [dbData, setDbData] = useState([])
-  const [lastSyncTime, setLastSyncTime] = useState(null)
-  const [status, setStatus] = useState('idle')
-  const [eventLog, setEventLog] = useState([])
-  const [loading, setLoading] = useState(false)
-  const isSyncingRef = useRef(false)
-  const pendingEventsRef = useRef([])
-
-  async function fetchData() {
-    setLoading(true)
-    try {
-      const [sheetRes, dbRes, metaRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/data/sheet`),
-        fetch(`${API_BASE_URL}/data/db`),
-        fetch(`${API_BASE_URL}/sync/meta`)
-      ])
-      const sheetJson = await sheetRes.json()
-      const dbJson = await dbRes.json()
-      const metaJson = await metaRes.json()
-      setSheetData({ headers: sheetJson.headers || [], rows: sheetJson.rows || [] })
-      setDbData(dbJson.rows || [])
-      setLastSyncTime(metaJson.lastSyncTime || null)
-    } catch (e) {
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    fetchData()
+  const refresh = useCallback(() => setRefreshKey(k => k + 1), [])
+  const notify = useCallback((message, tone) => {
+    const id = Math.random().toString(36).slice(2)
+    setToasts(t => [...t, { id, message, tone }])
+    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 5000)
   }, [])
 
-  useWebSocket(message => {
-    if (message.type === 'status') {
-      if (message.payload.status) {
-        setStatus(message.payload.status)
-        if (message.payload.status === 'syncing') {
-          isSyncingRef.current = true
-          pendingEventsRef.current = []
-        }
-        if (message.payload.status === 'idle') {
-          const pending = pendingEventsRef.current
-          isSyncingRef.current = false
-          pendingEventsRef.current = []
-          const inserts = pending.filter(e => e.type === 'sync_event' && e.payload?.action === 'insert').length
-          const updates = pending.filter(e => e.type === 'sync_event' && e.payload?.action === 'update').length
-          const deletes = pending.filter(e => e.type === 'sync_event' && e.payload?.action === 'delete').length
-          const conflicts = pending.filter(e => e.type === 'conflict_event').length
-          const parts = []
-          if (inserts) parts.push(`${inserts} insert${inserts > 1 ? 's' : ''}`)
-          if (updates) parts.push(`${updates} update${updates > 1 ? 's' : ''}`)
-          if (deletes) parts.push(`${deletes} delete${deletes > 1 ? 's' : ''}`)
-          if (conflicts) parts.push(`${conflicts} conflict${conflicts > 1 ? 's' : ''}`)
-          const summary = parts.length ? parts.join(', ') : 'no changes'
-          const timestamp = new Date().toISOString()
-          setEventLog(prev => {
-            const last = prev[0]
-            const sameAsLast = last?.type === 'sync_summary' && last?.summary === summary && last?.timestamp && (new Date(last.timestamp).getTime() - new Date(timestamp).getTime() < 2000)
-            if (sameAsLast) return prev
-            return [{ type: 'sync_summary', summary, timestamp }, ...prev].slice(0, 15)
-          })
-          fetchData()
-        }
-      }
-      if (message.payload.lastSyncTime) {
-        setLastSyncTime(message.payload.lastSyncTime)
-      }
+  const health = useResource(signal => api.health(signal), [refreshKey])
+  const facets = useResource(signal => api.facets(signal), [refreshKey])
+  const summary = useResource(signal => api.summary(signal), [refreshKey])
+
+  useEffect(() => {
+    if (health.data) setSyncing(health.data.syncing)
+  }, [health.data])
+
+  useServerEvents(event => {
+    if (event.type === 'sync.started') setSyncing(true)
+    if (event.type === 'sync.finished') {
+      setSyncing(false)
+      const r = event.result
+      notify(`Sync finished: ${r.pushed} pushed, ${r.conflicts} conflict${r.conflicts === 1 ? '' : 's'}, ${r.rejected} rejected.`)
+      refresh()
     }
-    if (message.type === 'sync_event' || message.type === 'conflict_event') {
-      if (isSyncingRef.current) {
-        pendingEventsRef.current.push({
-          type: message.type,
-          payload: message.payload || {}
-        })
-      }
+    if (event.type === 'sync.failed') {
+      setSyncing(false)
+      notify(`Sync failed: ${event.error}`, 'bad')
+      refresh()
     }
+    if (event.type === 'board.changed') refresh()
   })
 
-  const syncLabel = useMemo(() => {
-    if (status === 'syncing') {
-      return 'Syncing'
-    }
-    if (status === 'error') {
-      return 'Error'
-    }
-    return 'Idle'
-  }, [status])
-
-  const eventSummary = useMemo(() => eventLog.slice(0, 10), [eventLog])
-
-  async function handleForceSync() {
+  const startSync = async () => {
+    setSyncing(true)
     try {
-      await fetch(`${API_BASE_URL}/sync/force`, {
-        method: 'POST'
-      })
-      // Refetch after sync so UI shows updated data (fallback if WS is slow)
-      setTimeout(() => fetchData(), 2000)
-    } catch (e) {}
+      await api.startSync()
+    } catch (err) {
+      setSyncing(false)
+      notify(err.message, 'bad')
+    }
   }
 
+  // "Integrity" is the board with the integrity filter on; it keeps its own nav entry.
+  const view = state.view === 'board' && state.flagged && !state.stage && !state.owner && !state.q ? 'integrity' : state.view
+  const hrefFor = v => {
+    if (v === 'integrity') return buildQuery({ ...state, view: 'board', flagged: true, stage: '', owner: '', q: '', status: '', page: 1, ticket: null })
+    if (v === 'board') return buildQuery({ ...state, view: 'board', flagged: false, stage: '', owner: '', q: '', status: '', page: 1, ticket: null })
+    return buildQuery({ ...state, view: v, ticket: null })
+  }
+  const navigate = (e, v) => {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return
+    e.preventDefault()
+    if (v === 'integrity') update({ view: 'board', flagged: true, stage: '', owner: '', q: '', status: '', page: 1, ticket: null }, { push: true })
+    else if (v === 'board') update({ view: 'board', flagged: false, stage: '', owner: '', q: '', status: '', page: 1, ticket: null }, { push: true })
+    else update({ view: v, ticket: null }, { push: true })
+  }
+
+  const [title, blurb] = TITLES[view] ?? TITLES.board
+  const open = id => update({ ticket: id }, { push: true })
+
+  useEffect(() => {
+    document.title = `${title} · FieldServe`
+  }, [title])
+
   return (
-    <div className="min-h-screen bg-black text-white font-serif">
-      <div className="max-w-7xl mx-auto px-6 py-6 flex flex-col gap-6 h-full">
-        <header className="flex items-center justify-between border-b border-white/20 pb-4">
-          <div className="flex items-center gap-3">
+    <>
+      <a className="skip" href="#main">
+        Skip to content
+      </a>
+      <div className="shell">
+        <Rail view={view} href={hrefFor} onNavigate={navigate} health={health.data} syncing={syncing} onSync={startSync} summary={summary.data} />
+        <main id="main" className="main" tabIndex={-1}>
+          <header className="page-head">
             <div>
-              <h1 className="text-2xl tracking-wide">parity</h1>
-              <p className="text-sm text-white/60">Google Sheets ↔ MySQL live sync</p>
+              <h1>{title}</h1>
+              <p>{blurb}</p>
             </div>
-          </div>
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2">
-              <Activity
-                className={
-                  status === 'syncing'
-                    ? 'h-4 w-4 text-yellow-400'
-                    : status === 'error'
-                    ? 'h-4 w-4 text-red-500'
-                    : 'h-4 w-4 text-white/60'
-                }
-              />
-              <span className="text-sm uppercase tracking-wide text-white/70">{syncLabel}</span>
-            </div>
-            <div className="text-xs text-white/60 border border-white/20 rounded-full px-3 py-1">
-              Last sync:{' '}
-              {lastSyncTime ? formatReadable(lastSyncTime) : 'Not yet'}
-            </div>
-            <button
-              type="button"
-              onClick={handleForceSync}
-              className="inline-flex items-center gap-2 border border-white/30 px-3 py-1.5 text-sm rounded-full bg-black hover:bg-yellow-500 hover:text-black transition-colors"
-            >
-              <RefreshCw className="h-4 w-4" />
-              Sync Now
-            </button>
-          </div>
-        </header>
-        <main className="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-6 min-h-0">
-          <section className="border border-white/20 rounded-xl p-4 flex flex-col min-h-0">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <Sheet className="h-4 w-4 text-yellow-400" />
-                <h2 className="text-lg">Google Sheet</h2>
-              </div>
-              <span className="text-xs text-white/50">
-                {sheetData.rows.length} rows
-              </span>
-            </div>
-            <div className="flex-1 overflow-auto rounded-lg border border-white/20">
-              <DataTable headers={sheetData.headers} rows={sheetData.rows} />
-            </div>
-          </section>
-          <section className="border border-white/20 rounded-xl p-4 flex flex-col min-h-0">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <Database className="h-4 w-4 text-yellow-400" />
-                <h2 className="text-lg">MySQL</h2>
-              </div>
-              <span className="text-xs text-white/50">{dbData.length} rows</span>
-            </div>
-            <div className="flex-1 overflow-auto rounded-lg border border-white/20 mb-4">
-              <DbTable rows={dbData} sheetHeaders={sheetData.headers} />
-            </div>
-          </section>
-          {/* <section className="border border-white/20 rounded-lg p-3">
-              <h3 className="text-xs uppercase tracking-wide text-white/50 mb-2">
-                Recent activity
-              </h3>
-              <div className="space-y-1 text-xs">
-                {eventSummary.length === 0 && (
-                  <div className="text-white/40">No activity yet</div>
-                )}
-                {eventSummary.map((item, index) => (
-                  <div
-                    key={`${item.timestamp}-${index}`}
-                    className="flex items-center justify-between text-white/70"
-                  >
-                    <span>
-                      {item.type === 'sync_summary'
-                        ? `Sync: ${item.summary}`
-                        : `${item.type === 'sync_event' ? 'Sync' : 'Conflict'} ${item.payload?.id ?? '-'} ${item.payload?.action ?? item.payload?.winner ?? ''}`}
-                    </span>
-                    <span className="text-white/40 tabular-nums">
-                      {new Date(item.timestamp).toLocaleTimeString()}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </section> */}
+          </header>
 
+          {(state.view === 'board') && (
+            <Board state={state} update={update} facets={facets.data} summary={summary.data} refreshKey={refreshKey} onOpen={open} />
+          )}
+          {state.view === 'workload' && (
+            <Workload
+              summary={summary.data}
+              onPickOwner={owner => update({ view: 'board', owner, flagged: false, stage: '', q: '', page: 1 }, { push: true })}
+              onPickStage={stage => update({ view: 'board', stage, owner: '', flagged: false, q: '', page: 1 }, { push: true })}
+            />
+          )}
+          {state.view === 'activity' && <ActivityView tab={state.tab} onTab={tab => update({ tab })} refreshKey={refreshKey} onOpen={open} />}
         </main>
-        {loading && (
-          <div className="fixed bottom-4 right-4 text-xs text-white/70 bg-black border border-white/20 px-3 py-1.5 rounded-full">
-            Loading data
+      </div>
+
+      {state.ticket && (
+        <Drawer key={state.ticket} id={state.ticket} refreshKey={refreshKey} onClose={() => update({ ticket: null }, { push: true })} onSaved={refresh} notify={notify} />
+      )}
+
+      <div className="toasts" aria-live="polite" aria-atomic="false">
+        {toasts.map(t => (
+          <div key={t.id} className="toast" data-tone={t.tone}>
+            {t.message}
           </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function DataTable({ headers: rawHeaders, rows }) {
-  const headers = orderColumns(rawHeaders || [], sanitizeColumnKey)
-  if (!headers.length) {
-    return (
-      <div className="p-4 text-sm text-white/50 bg-black">
-        No data available
-      </div>
-    )
-  }
-  return (
-    <table className="min-w-full text-xs bg-black">
-      <thead className="bg-white/5 sticky top-0 z-10">
-        <tr>
-          {headers.map(header => (
-            <th
-              key={header}
-              className="px-3 py-2 text-left font-normal text-white/80 border-b border-white/20"
-            >
-              {header}
-            </th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map(row => (
-          <tr key={row.id}>
-            {headers.map(header => {
-              const key = sanitizeColumnKey(header)
-              return (
-                <td
-                  key={header}
-                  className="px-3 py-1.5 border-b border-white/10 text-white/80"
-                >
-                  {key === 'updated_at' && row.updated_at
-                    ? formatReadable(row.updated_at)
-                    : String(row[key] ?? '')}
-                </td>
-              )
-            })}
-          </tr>
         ))}
-      </tbody>
-    </table>
-  )
-}
-
-const DB_HIDE_COLUMNS = ['checksum']
-
-function sanitizeColumnKey(header) {
-  const trimmed = String(header || '').trim().toLowerCase()
-  let normalized = trimmed.replace(/[^a-z0-9]+/g, '_')
-  if (/^[0-9]/.test(normalized)) normalized = `col_${normalized}`
-  return normalized || 'col_unnamed'
-}
-
-function DbTable({ rows, sheetHeaders = [] }) {
-  if (!rows || !rows.length) {
-    return (
-      <div className="p-4 text-sm text-white/50 bg-black">
-        No data available
       </div>
-    )
-  }
-  // Plain computation, not useMemo: a hook after the early return above runs
-  // only on some renders, which React rejects when rows go from 0 to some.
-  const keys = orderColumns(Object.keys(rows[0]).filter(k => !DB_HIDE_COLUMNS.includes(k)))
-  const keySet = new Set(keys)
-  const keyToLabel = {}
-  keys.forEach(k => {
-    keyToLabel[k] = k
-  })
-  if (Array.isArray(sheetHeaders) && sheetHeaders.length) {
-    sheetHeaders.forEach(h => {
-      const key = sanitizeColumnKey(h)
-      if (keySet.has(key)) keyToLabel[key] = String(h).trim() || key
-    })
-  }
-  return (
-    <table className="min-w-full text-xs bg-black">
-      <thead className="bg-white/5 sticky top-0 z-10">
-        <tr>
-          {keys.map(key => (
-            <th
-              key={key}
-              className="px-3 py-2 text-left font-normal text-white/80 border-b border-white/20"
-            >
-              {keyToLabel[key] ?? key}
-            </th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map(row => (
-          <tr key={row.id}>
-            {keys.map(key => (
-              <td
-                key={key}
-                className="px-3 py-1.5 border-b border-white/10 text-white/80"
-              >
-                {key === 'updated_at' && row[key]
-                  ? formatReadable(row[key])
-                  : String(row[key] ?? '')}
-              </td>
-            ))}
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    </>
   )
 }
-
-export default App

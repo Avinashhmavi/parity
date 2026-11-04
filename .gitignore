@@ -1,16 +1,28 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node
 node_modules/
-dist/
-coverage/
+client/dist/
 
-# Never commit real credentials; server/.env.example is the template.
+# Secrets: never commit a real key. .env.example is the template.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
-*.log
-npm-debug.log*
+# Runtime data: the workbook and sync baseline are per-API-key state.
+data/
+*.lock
 
+# Editors / OS
 .DS_Store
 .vscode/*
 !.vscode/extensions.json
 .idea/
+*.log

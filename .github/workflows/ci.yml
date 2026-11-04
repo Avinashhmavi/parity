@@ -2,150 +2,56 @@ name: CI
 
 on:
   push:
-    branches: [main, test]
+    branches: [main]
   pull_request:
-    branches: [main, test]
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  lint:
-    name: Lint
+  backend:
+    name: Backend (lint + tests)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-python@v5
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: server/package-lock.json
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: pytest --cov=fieldserve_board --cov-report=term-missing
 
-      - run: npm ci
-        working-directory: server
-
-      - run: npm run lint
-        working-directory: server
-
-  unit-tests:
-    name: Unit tests
+  ui:
+    name: UI (tests + build)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: server/package-lock.json
-
-      - run: npm ci
-        working-directory: server
-
-      - run: npm run test:unit
-        working-directory: server
-
-  integration-tests:
-    name: Integration tests
-    runs-on: ubuntu-latest
-
-    services:
-      mysql:
-        image: mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: parity
-          MYSQL_DATABASE: parity_test
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -pparity"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=20
-
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd="redis-cli ping"
-          --health-interval=5s
-          --health-timeout=3s
-          --health-retries=10
-
-    env:
-      DB_INTEGRATION: '1'
-      DB_HOST: 127.0.0.1
-      DB_PORT: '3306'
-      DB_USER: root
-      DB_PASSWORD: parity
-      DB_NAME: parity_test
-      REDIS_URL: redis://127.0.0.1:6379
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: server/package-lock.json
-
-      - run: npm ci
-        working-directory: server
-
-      - name: Run integration tests
-        run: npm run test:integration
-        working-directory: server
-
-      - name: Load test
-        run: npm run loadtest -- --rows 10000
-        working-directory: server
-
-  client-build:
-    name: Client build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: client/package-lock.json
-
       - run: npm ci
-        working-directory: client
-
+      - run: npm test
       - run: npm run build
-        working-directory: client
 
-  docker-build:
-    name: Docker images
+  docker:
+    name: Docker image
     runs-on: ubuntu-latest
-    # Only worth the minutes once the code itself is known good.
-    needs: [lint, unit-tests, integration-tests, client-build]
+    needs: [backend, ui]
     steps:
       - uses: actions/checkout@v4
-
       - uses: docker/setup-buildx-action@v3
-
-      - name: Build server image
-        uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v6
         with:
-          context: ./server
+          context: .
           push: false
-          tags: parity-server:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build client image
-        uses: docker/build-push-action@v6
-        with:
-          context: ./client
-          push: false
-          tags: parity-client:${{ github.sha }}
+          tags: fieldserve-board:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
