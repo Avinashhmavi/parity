@@ -9,7 +9,8 @@
 # never put on a command line, in shell history, or in the repo.
 set -euo pipefail
 
-KEY="${1:?usage: deploy/deploy.sh <private-key.pem>}"
+KEY="${1:?usage: deploy/deploy.sh <private-key.pem>   e.g. deploy/deploy.sh ~/Downloads/test.pem}"
+KEY="${KEY/#\~/$HOME}"  # tolerate a quoted ~ that the shell did not expand
 HOST="${DEPLOY_HOST:-ubuntu@ec2-13-233-251-144.ap-south-1.compute.amazonaws.com}"
 APP_DIR="${APP_DIR:-fieldserve-board}"
 API_URL="${FIELDOPS_BASE_URL:-http://13.233.55.184:8377}"
@@ -18,7 +19,8 @@ API_URL="${FIELDOPS_BASE_URL:-http://13.233.55.184:8377}"
 chmod 400 "$KEY"
 SSH=(ssh -i "$KEY" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 "$HOST")
 
-cd "$(git rev-parse --show-toplevel)"
+# Work from the repo root no matter where the script was started from.
+cd "$(dirname "$0")/.."
 if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "note: uncommitted changes are NOT deployed (git archive ships HEAD only)" >&2
 fi
@@ -39,7 +41,8 @@ else
   read -r -s -p "FieldServe API key: " API_KEY; echo
   read -r -s -p "Board password (blank = generate one): " BOARD_PW; echo
   if [ -z "$BOARD_PW" ]; then
-    BOARD_PW="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)"
+    # head closes the pipe early, which makes tr exit 141; "|| true" keeps pipefail from aborting.
+    BOARD_PW="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24 || true)"
     echo "generated board password (shown once): $BOARD_PW"
   fi
   printf 'FIELDOPS_BASE_URL=%s\nFIELDOPS_API_KEY=%s\nBOARD_USER=board\nBOARD_PASSWORD=%s\nCONFLICT_POLICY=api\nTRUSTED_EMAIL_DOMAINS=omnimart.example\n' \
