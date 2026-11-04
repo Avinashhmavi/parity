@@ -196,9 +196,10 @@ def clear_styles(field: str) -> List[str]:
 
     The live API answers 200 to a clear it does not understand and leaves the
     value alone, so the engine tries each style and checks the result. An
-    engineer id can only be null.
+    engineer id can only be null. For documents the live API answers
+    ``400 invoice must be a string`` to null, so the empty string goes first.
     """
-    return [CLEAR_NULL] if field == "engineer" else [CLEAR_NULL, CLEAR_EMPTY]
+    return [CLEAR_NULL] if field == "engineer" else [CLEAR_EMPTY, CLEAR_NULL]
 
 
 def api_payload(field: str, value: str, roster: Roster, clear_style: str = CLEAR_NULL) -> Dict[str, object]:

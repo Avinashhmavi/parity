@@ -23,6 +23,7 @@ from .. import board
 from ..client import ApiError, FieldServeClient
 from ..config import Settings
 from ..engine import SyncEngine, build_engine
+from ..locking import file_lock
 from ..models import STATUS_LABELS, Ticket
 
 URL_A = "https://example.com/live-check/a.pdf"
@@ -45,10 +46,26 @@ class Check:
     def sync(self):
         # One full listing costs ~23 of the 60 requests a minute; an incremental
         # one costs ~2 and is what the web app uses between full syncs.
-        return self.engine.run("incremental")
+        self.last = self.engine.run("incremental")
+        return self.last
+
+    def diagnostics(self) -> str:
+        """What a failed check needs to be debuggable from a pasted log."""
+        r = getattr(self, "last", None)
+        parts = []
+        if r is not None:
+            parts.append(
+                f"last sync: pushed={r.pushed} conflicts={r.conflicts} rejected={r.rejected} errors={r.errors} requests={r.requests}"
+            )
+        recent = [a for a in self.engine.backend.read_table(board.ACTIVITY) if a.get("Ticket ID") == str(self.id)][:4]
+        parts.extend(f"{a.get('Kind')}: {a.get('Message')}" for a in recent)
+        return " | ".join(parts)
 
     def edit(self, column: str, value: str) -> None:
-        problems = self.engine.backend.edit_cells([(self.id, column, value)])
+        # Take the same lock a sync holds. Without it this "human" edit can land in
+        # the middle of the web app's scheduled sync and be overwritten by it.
+        with file_lock(self.engine.lock_path):
+            problems = self.engine.backend.edit_cells([(self.id, column, value)])
         if problems:
             raise AssertionError(f"could not edit the sheet: {problems}")
 
@@ -62,8 +79,9 @@ class Check:
         try:
             fn()
         except (AssertionError, ApiError) as exc:
-            self.results.append((name, False, str(exc)))
-            print(f"FAIL  {name}: {exc}")
+            detail = f"{exc}  [{self.diagnostics()}]"
+            self.results.append((name, False, detail))
+            print(f"FAIL  {name}: {detail}")
         else:
             self.results.append((name, True, ""))
             print(f"PASS  {name}")
@@ -111,16 +129,23 @@ def run_checks(engine: SyncEngine, ticket_id: int) -> List[Result]:
             """Report, from raw PUTs, which blank the API understands (it answers 200 either way)."""
             c.client.update_ticket(ticket_id, {"invoice": URL_A})
             findings = []
-            for label, blank in (("null", None), ("empty string", "")):
-                c.client.update_ticket(ticket_id, {"invoice": blank})
+            for label, blank in (("empty string", ""), ("null", None)):
+                try:
+                    c.client.update_ticket(ticket_id, {"invoice": blank})
+                except ApiError as exc:  # e.g. 400 "invoice must be a string": the API names its own rule
+                    findings.append(f"{label}=REFUSED ({exc.message})")
+                    continue
                 cleared = c.api().invoice == ""
                 findings.append(f"{label}={'clears' if cleared else 'IGNORED'}")
                 if cleared:
                     break
                 c.client.update_ticket(ticket_id, {"invoice": URL_A})
             print("      document blank styles:", ", ".join(findings))
-            c.client.update_ticket(ticket_id, {"engineer_id": None})
-            eng = "clears" if c.api().engineer_id is None else "IGNORED"
+            try:
+                c.client.update_ticket(ticket_id, {"engineer_id": None})
+                eng = "clears" if c.api().engineer_id is None else "IGNORED"
+            except ApiError as exc:
+                eng = f"REFUSED ({exc.message})"
             print(f"      engineer_id null: {eng}")
             c.client.update_ticket(ticket_id, {"engineer_id": original.engineer_id})
             assert any("clears" in f for f in findings), "the API accepts no way of blanking a document"

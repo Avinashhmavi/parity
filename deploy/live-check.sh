@@ -7,6 +7,10 @@
 #   bash deploy/live-check.sh 195765     # use a specific ticket id
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# The web app syncs on a timer. Pause it so its sync cannot interleave with this
+# check, and always bring it back, even if the check fails.
+sudo docker compose stop board >/dev/null 2>&1 || true
+trap 'sudo docker compose start board >/dev/null 2>&1 || true' EXIT
 ARGS=(--yes)
 [ -n "${1:-}" ] && ARGS+=(--ticket "$1")
-sudo docker compose run --rm --no-deps -T board python3 -m fieldserve_board.devtools.live_check "${ARGS[@]}" 2>&1 | grep -v -E '^ ?Container |^ ?Network '
+sudo docker compose run --rm --no-deps -T board python3 -m fieldserve_board.devtools.live_check "${ARGS[@]}" 2>&1 | grep -v -E '^ ?Container |^ ?Network ' || true
