@@ -168,3 +168,32 @@ def test_garbage_authorization_headers_are_rejected_not_crashed(rig):
     with _locked(rig) as c:
         for header in ("Basic", "Basic !!!notbase64", "Bearer abc", "Basic " + "A" * 10):
             assert c.get("/api/board", headers={"Authorization": header}).status_code == 401
+
+
+def test_repeated_wrong_passwords_lock_the_client_out_even_for_the_right_one(rig):
+    import base64
+
+    from fieldserve_board.web.app import LoginThrottle
+
+    now = [0.0]
+    throttle = LoginThrottle(max_failures=3, window=60, clock=lambda: now[0])
+    rig.sync()
+    from fieldserve_board.config import Settings
+
+    settings = Settings.from_env(
+        {"FIELDOPS_BASE_URL": rig.settings.base_url, "FIELDOPS_API_KEY": "fk_test", "BOARD_XLSX_PATH": str(rig.xlsx),
+         "BOARD_STATE_PATH": str(rig.settings.state_path), "BOARD_PASSWORD": "pw"}
+    )
+    service = BoardService(settings, rig.backend, rig.store, rig.engine)
+    good = {"Authorization": "Basic " + base64.b64encode(b"board:pw").decode(), "X-Forwarded-For": "9.9.9.9"}
+    bad = {"Authorization": "Basic " + base64.b64encode(b"board:nope").decode(), "X-Forwarded-For": "9.9.9.9"}
+    with TestClient(create_app(service=service, throttle=throttle)) as c:
+        assert c.get("/api/board").status_code == 401  # no header at all is not a failure
+        for _ in range(3):
+            assert c.get("/api/board", headers=bad).status_code == 401
+        locked = c.get("/api/board", headers=good)
+        assert locked.status_code == 429 and int(locked.headers["retry-after"]) > 0
+        other = {**good, "X-Forwarded-For": "8.8.8.8"}
+        assert c.get("/api/board", headers=other).status_code == 200  # a different client is unaffected
+        now[0] += 61  # the window passes
+        assert c.get("/api/board", headers=good).status_code == 200

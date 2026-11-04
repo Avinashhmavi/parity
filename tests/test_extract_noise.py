@@ -77,3 +77,38 @@ def test_store_code_is_found_from_the_requester_name_alone():
 
 def test_bare_code_is_removed_from_a_subject_derived_store_name():
     assert extract("PM AT OMNIMART M9GDCU TARVENO", "", "").store_name == "Tarveno"
+
+
+# Subjects and senders taken from the first real report (promomail.example is the
+# bulk-mail domain; the alert templates carry device/account numbers).
+@pytest.mark.parametrize(
+    "subject,email,name",
+    [
+        ("Grow your business with a Premium Listing - offer inside", "zelmefa.deka@promomail.example", ""),
+        ("Your listing has 4 potential customers waiting", "x.y@promomail.example", ""),
+        ("? This Summer, Sell Smart & Earn More with Huvo", "bofinmin.banfe@mailhost.example", ""),
+        ("Re: Lease opportunity at prime commercial location", "a.b@mailhost.example", ""),
+        ("DVR OFFLINE ALERT - DEVICE 48213", "store.k7q2xr@omnimart.example", "OmniMart Rarsi (K7Q2XR)"),
+        ("MISSED CALL ALERT FROM 9876543210", "store.k7q2xr@omnimart.example", "OmniMart Rarsi (K7Q2XR)"),
+        ("Monthly usage quota limit exceeded for account 55120", "billing.bot@mailhost.example", ""),
+    ],
+)
+def test_noise_seen_in_the_real_data(subject, email, name):
+    verdict = classify(subject, email, extract(subject, email, name), TRUST)
+    assert verdict.is_noise and verdict.reason
+
+
+@pytest.mark.parametrize(
+    "subject,email",
+    [
+        ("Re: Reminder 5 Outstanding payment from DITI 4 branches", "paso.tonel@mailhost.example"),  # a person chasing a bill
+        ("Fw: Complaint Regarding Unnecessary Security Alarm Ringing", "tanve.fanto@mailhost.example"),
+        ("327_Quotation for Emergency Stairs VELNA System", "gapazu.mifo@mailhost.example"),
+        ("PM at GELSANHU", "varnu.nufar@mailhost.example"),
+        ("Service - NVR not working", "habire.bire@mailhost.example"),
+        ("PM AT OMNIMART PANGE 4212", "helpa.vefin@mailhost.example"),
+        ("Site survey for Velna bas & Norbel", "sinor.dorsi@mailhost.example"),
+    ],
+)
+def test_real_business_emails_from_the_real_data_are_kept(subject, email):
+    assert not classify(subject, email, extract(subject, email), TRUST).is_noise

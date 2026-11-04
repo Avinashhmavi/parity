@@ -18,6 +18,12 @@ from .workflow import DocState, classify_document
 
 _CODE_TOKEN = re.compile(r"\b(?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{6}\b")
 _DIGITS = re.compile(r"\d+")
+# Broad on purpose: lists what *might* still be noise on the board so a human can judge.
+_SUSPECT = re.compile(
+    r"(alert|offer|listing|quota|exceeded|unsubscribe|promo|webinar|newsletter|missed call|lease|premium|discount|"
+    r"auto[- ]?reply|undeliverable|do not reply|notification|reminder|invoice overdue)",
+    re.IGNORECASE,
+)
 
 
 def subject_shape(subject: str) -> str:
@@ -72,6 +78,21 @@ def build_report(rows: Iterable[Mapping[str, str]], noise_rows: Iterable[Mapping
         add(f"  #{r.get('Ticket ID')}  {r.get('Subject', '')[:70]!r}  <{r.get('Requester', '')}>")
     if not no_store:
         add("  (none)")
+
+    add("")
+    add("Top subject shapes per requester domain:")
+    by_domain: Dict[str, Counter] = {}
+    for r in rows:
+        by_domain.setdefault(email_domain(r.get("Requester", "")) or "(none)", Counter())[subject_shape(r.get("Subject", ""))] += 1
+    for domain, shapes_for in sorted(by_domain.items(), key=lambda kv: -sum(kv[1].values())):
+        add(f"  [{domain}]  {sum(shapes_for.values())} tickets")
+        out.extend("  " + line for line in _top(shapes_for, 5))
+
+    suspects = [r for r in rows if _SUSPECT.search(r.get("Subject", ""))]
+    add("")
+    add(f"Still on the board but alert/offer/reminder-looking: {len(suspects)} (up to {sample})")
+    for r in suspects[:sample]:
+        add(f"  #{r.get('Ticket ID')}  {r.get('Subject', '')[:60]!r}  <{r.get('Requester', '')}>  store={r.get('Store Code') or '-'}")
 
     add("")
     add("Documents (valid link / waived / empty / junk):")

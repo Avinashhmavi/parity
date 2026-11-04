@@ -1,0 +1,11 @@
+# TLS termination in front of the board. Caddy gets and renews a Let's Encrypt
+# certificate for $DOMAIN automatically (needs inbound TCP 80 and 443).
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy board:8000
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+	}
+}

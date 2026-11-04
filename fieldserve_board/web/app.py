@@ -12,6 +12,7 @@ import contextlib
 import logging
 import os
 import secrets
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -58,6 +59,47 @@ def basic_auth_ok(header: Optional[str], user: str, password: str) -> bool:
     return secrets.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
 
 
+class LoginThrottle:
+    """Lock a client out after repeated *wrong* credentials (not after a missing header:
+    browsers always send one request without credentials before the login prompt)."""
+
+    def __init__(self, max_failures: int = 10, window: float = 300.0, clock=time.monotonic):
+        self.max_failures = max_failures
+        self.window = window
+        self._clock = clock
+        self._failures: Dict[str, List[float]] = {}
+
+    def _recent(self, key: str) -> List[float]:
+        now = self._clock()
+        recent = [t for t in self._failures.get(key, []) if now - t < self.window]
+        if recent:
+            self._failures[key] = recent
+        else:
+            self._failures.pop(key, None)
+        return recent
+
+    def retry_after(self, key: str) -> int:
+        recent = self._recent(key)
+        if len(recent) < self.max_failures:
+            return 0
+        return max(1, int(self.window - (self._clock() - recent[0])))
+
+    def failed(self, key: str) -> None:
+        self._failures.setdefault(key, []).append(self._clock())
+        if len(self._failures) > 5000:  # bound memory under a spray of addresses
+            for stale in list(self._failures)[:1000]:
+                self._recent(stale)
+
+    def succeeded(self, key: str) -> None:
+        self._failures.pop(key, None)
+
+
+def client_key(headers, peer: Optional[str]) -> str:
+    """Caddy sets X-Forwarded-For to the real client; the app is only reachable through it."""
+    forwarded = (headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    return forwarded or peer or "unknown"
+
+
 class Hub:
     """Fan-out of server events to connected browsers."""
 
@@ -79,8 +121,11 @@ class Hub:
                 self.drop(ws)
 
 
-def create_app(settings: Optional[Settings] = None, service: Optional[BoardService] = None) -> FastAPI:
+def create_app(
+    settings: Optional[Settings] = None, service: Optional[BoardService] = None, throttle: Optional[LoginThrottle] = None
+) -> FastAPI:
     hub = Hub()
+    throttle = throttle or LoginThrottle()
     sync_lock = asyncio.Lock()
 
     if service is None:
@@ -134,8 +179,18 @@ def create_app(settings: Optional[Settings] = None, service: Optional[BoardServi
         @app.middleware("http")
         async def require_login(request: Request, call_next):
             # /api/live is the only open route: a bare liveness probe for Docker.
-            if request.url.path == "/api/live" or basic_auth_ok(request.headers.get("authorization"), settings.access_user, settings.access_password):
+            if request.url.path == "/api/live":
                 return await call_next(request)
+            who = client_key(request.headers, request.client.host if request.client else None)
+            wait = throttle.retry_after(who)
+            if wait:
+                return Response("Too many failed logins", status_code=429, headers={"Retry-After": str(wait)})
+            header = request.headers.get("authorization")
+            if basic_auth_ok(header, settings.access_user, settings.access_password):
+                throttle.succeeded(who)
+                return await call_next(request)
+            if header:
+                throttle.failed(who)
             return Response("Authentication required", status_code=401, headers={"WWW-Authenticate": 'Basic realm="FieldServe Board", charset="UTF-8"'})
     else:
         log.warning("BOARD_PASSWORD is not set: the board has no login. Only expose it on localhost or behind your own auth.")
@@ -249,9 +304,14 @@ def create_app(settings: Optional[Settings] = None, service: Optional[BoardServi
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:
         # The HTTP middleware does not see websocket handshakes, so check here.
-        if settings.access_password and not basic_auth_ok(socket.headers.get("authorization"), settings.access_user, settings.access_password):
-            await socket.close(code=4401)
-            return
+        if settings.access_password:
+            who = client_key(socket.headers, socket.client.host if socket.client else None)
+            header = socket.headers.get("authorization")
+            if throttle.retry_after(who) or not basic_auth_ok(header, settings.access_user, settings.access_password):
+                if header and not throttle.retry_after(who):
+                    throttle.failed(who)
+                await socket.close(code=4401)
+                return
         await hub.connect(socket)
         try:
             await socket.send_json({"type": "hello", "syncing": sync_lock.locked()})

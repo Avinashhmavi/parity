@@ -137,7 +137,11 @@ Tickets that are not work (automated alerts, marketing) are kept off `Tickets` a
 - Noise requires evidence: spam wording from a non-trusted sender; an automated mailbox (`no-reply@`, `alerts@`, `mailer-daemon@`…) with no store; machine-only wording ("Delivery Status Notification", "out of office"); or alert-style wording with no store *and* no job type. Senders on `TRUSTED_EMAIL_DOMAINS` (default `omnimart.example`) are given the benefit of the doubt.
 - Re-evaluated every sync: a ticket that gains a store code moves onto the board.
 
-The heuristics were written from the brief's description, not from the real dataset. Check the `Noise` sheet after the first real sync.
+Tuned on the live dataset's report (1,007 tickets; `deploy/report.sh`):
+
+- **Bulk-mail sender domains** (`promomail.example`: "Grow your business with a Premium Listing", "Your listing has N potential customers waiting", "Lease opportunity at prime commercial location"): the sender's domain label contains `promo`, `marketing`, `newsletter`, `bulk`, `deals`, `offers`, `campaign` or `advert`, and is not a trusted domain.
+- **Automated alert templates** ("DVR OFFLINE ALERT - DEVICE 48213", "MISSED CALL ALERT FROM 98…", "MONTHLY USAGE QUOTA LIMIT EXCEEDED FOR ACCOUNT 55120"): alert vocabulary **plus a device/account/phone number**. This rule runs even when a store code is present, because these senders reuse store mailboxes.
+- **Kept on purpose:** a person chasing a bill ("Re: Reminder 5 Outstanding payment from DITI 4 branches"), quotation threads, site surveys, complaints. They are not alerts or marketing; they are work for Finance or the manager, so they stay on the board where someone can act on them. That is a judgement call; say so if you disagree and it is a one-line rule to change.
 
 ## Messy extraction
 
@@ -180,13 +184,20 @@ Afterwards, on the server (`ssh ... 'cd fieldserve-board && bash deploy/<script>
 - `deploy/report.sh`: a compact data-quality report (counts and samples) for tuning the noise and extraction rules on the real data.
 - `deploy/live-check.sh`: verifies the **write** path against the real API by temporarily changing one ticket (document, status, engineer, both-sides-at-once, same-field conflict) and restoring it. Only run it on a dataset you may modify.
 
-The container publishes on the server's `127.0.0.1:8000` only. Reach it with `ssh -i key -L 8000:127.0.0.1:8000 ubuntu@host` and open `http://localhost:8000`.
+**HTTPS address.** From an `ec2-A-B-C-D…` hostname or a bare IP, `deploy.sh` derives `A-B-C-D.sslip.io` (sslip.io resolves that name to the IP, so there is no DNS to set up), writes `DOMAIN` and `COMPOSE_PROFILES=tls` to the server's `.env`, and starts a Caddy container that obtains and renews a Let's Encrypt certificate. Then open `https://13-233-251-144.sslip.io` (user `board`). Requirements and caveats:
+
+- The instance's **Security Group must allow inbound TCP 80 and 443** from `0.0.0.0/0` (EC2, Instances, Security, Edit inbound rules). Without that the browser shows "refused" or times out.
+- A public IP that changes when the instance is stopped and started changes the name; attach an Elastic IP to keep it stable.
+- sslip.io is a shared domain, so Let's Encrypt rate limits can occasionally apply; Caddy falls back to another certificate authority automatically. For anything lasting, use your own domain: `DEPLOY_DOMAIN=board.example.com deploy/deploy.sh key.pem` (point an A record at the server first). `DEPLOY_DOMAIN=none` keeps it tunnel-only.
+- The login throttles failed attempts: 10 wrong passwords from one address locks it out for 5 minutes.
+
+Without the `tls` profile the container publishes on the server's `127.0.0.1:8000` only; reach it with `ssh -i key -L 8000:127.0.0.1:8000 ubuntu@host` and open `http://localhost:8000`.
 
 ## Tests
 
 ```bash
 pip install -r requirements-dev.txt
-ruff check . && pytest --cov=fieldserve_board     # 124 tests: workflow, extraction, noise, merge, client, sync e2e, web, gsheets
+ruff check . && pytest --cov=fieldserve_board     # 147 tests: workflow, extraction, noise, merge, client, sync e2e, web, gsheets
 cd client && npm test && npm run build            # 6 UI helper tests + production build
 ```
 

@@ -13,6 +13,18 @@ KEY="${1:?usage: deploy/deploy.sh <private-key.pem>   e.g. deploy/deploy.sh ~/Do
 KEY="${KEY/#\~/$HOME}"  # tolerate a quoted ~ that the shell did not expand
 HOST="${DEPLOY_HOST:-ubuntu@ec2-13-233-251-144.ap-south-1.compute.amazonaws.com}"
 APP_DIR="${APP_DIR:-fieldserve-board}"
+# Public HTTPS name. sslip.io maps 13-233-251-144.sslip.io to 13.233.251.144, so
+# no DNS setup is needed. Derived from an ec2-A-B-C-D hostname; override with
+# DEPLOY_DOMAIN=your.domain, or DEPLOY_DOMAIN=none for tunnel-only access.
+if [ -z "${DEPLOY_DOMAIN:-}" ]; then
+  if [[ "$HOST" =~ ec2-([0-9]+)-([0-9]+)-([0-9]+)-([0-9]+)\. ]]; then
+    DEPLOY_DOMAIN="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}-${BASH_REMATCH[4]}.sslip.io"
+  elif [[ "$HOST" =~ @([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    DEPLOY_DOMAIN="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}-${BASH_REMATCH[4]}.sslip.io"
+  else
+    DEPLOY_DOMAIN="none"
+  fi
+fi
 API_URL="${FIELDOPS_BASE_URL:-http://13.233.55.184:8377}"
 
 [ -f "$KEY" ] || { echo "key file not found: $KEY" >&2; exit 1; }
@@ -51,12 +63,33 @@ else
   unset API_KEY BOARD_PW
 fi
 
+# Keep DOMAIN / COMPOSE_PROFILES in the server's .env in step with this run.
+if [ "$DEPLOY_DOMAIN" != "none" ]; then
+  "${SSH[@]}" "cd ~/$APP_DIR && sed -i '/^DOMAIN=/d;/^COMPOSE_PROFILES=/d' .env && printf 'DOMAIN=%s\nCOMPOSE_PROFILES=tls\n' '$DEPLOY_DOMAIN' >> .env"
+else
+  "${SSH[@]}" "cd ~/$APP_DIR && sed -i '/^DOMAIN=/d;/^COMPOSE_PROFILES=/d' .env"
+fi
+
 echo "==> building and starting"
 "${SSH[@]}" "cd ~/$APP_DIR && mkdir -p data && sudo chown -R 10001 data && sudo docker compose up -d --build"
 
 echo "==> verifying (this talks to the REAL FieldServe API from the VPS)"
 "${SSH[@]}" "cd ~/$APP_DIR && bash deploy/verify.sh"
 
+if [ "$DEPLOY_DOMAIN" != "none" ]; then
+cat <<MSG
+
+Done. Open  https://$DEPLOY_DOMAIN   (user: board, password: the one you set)
+
+If the page does not load, the AWS Security Group must allow inbound TCP 80 and
+443 from anywhere (EC2 > Instances > your instance > Security > Edit inbound rules).
+Certificates are issued on the first request, which can take up to a minute.
+
+Tunnel alternative (works without opening ports):
+  ssh -i $KEY -L 8000:127.0.0.1:8000 $HOST   then   http://localhost:8000
+MSG
+exit 0
+fi
 cat <<MSG
 
 Done. The console listens on the server's localhost only. Open it with a tunnel:

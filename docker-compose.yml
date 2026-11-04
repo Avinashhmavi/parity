@@ -1,6 +1,7 @@
-# One container: FastAPI + the built UI. Board and sync state persist in ./data.
-#   cp .env.example .env   # set FIELDOPS_API_KEY
-#   docker compose up --build   ->   http://localhost:8000
+# FastAPI + the built UI, optionally behind Caddy for automatic HTTPS.
+#   cp .env.example .env     # set FIELDOPS_API_KEY (and DOMAIN + COMPOSE_PROFILES=tls for HTTPS)
+#   docker compose up --build
+# Without the "tls" profile the app is only on 127.0.0.1:8000 (use an SSH tunnel).
 services:
   board:
     build: .
@@ -10,8 +11,26 @@ services:
       BOARD_STATE_PATH: /app/data/sync_state.json
       SYNC_INTERVAL_SECONDS: "120"
     ports:
-      # Published on localhost only: the console has no authentication.
       - "127.0.0.1:8000:8000"
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    profiles: ["tls"]
+    depends_on: [board]
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
