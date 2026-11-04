@@ -1,0 +1,31 @@
+[project]
+name = "fieldserve-board"
+version = "1.0.0"
+description = "Two-way sync between the FieldServe helpdesk API and a spreadsheet, with a six-step workflow board."
+requires-python = ">=3.9"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning:starlette.*"]
+
+[tool.ruff]
+line-length = 140
+target-version = "py39"
+extend-exclude = [".venv", "client", "data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = [
+  "E501",    # long lines are reported by the formatter, not worth failing CI over
+  "SIM108",
+  "RUF012",
+  "B008",    # FastAPI's Query(...) defaults are idiomatic
+  "UP045",   # Optional[X] is fine on 3.9-compatible code
+  "UP007",
+  "UP006",
+  "UP035",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B", "RUF"]

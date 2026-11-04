@@ -1,0 +1,10 @@
+# Sync + sheet CLIs (what the evaluator needs)
+requests>=2.31
+openpyxl>=3.1
+
+# Optional: Google Sheets backend (BOARD_BACKEND=gsheets)
+gspread>=6.0
+
+# Web API (python -m uvicorn fieldserve_board.web.app:app)
+fastapi>=0.110
+uvicorn[standard]>=0.29
