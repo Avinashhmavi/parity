@@ -323,3 +323,69 @@ def test_report_prints_counts_and_samples_not_the_dataset(rig, capsys, monkeypat
     text = capsys.readouterr().out
     assert "TICKETS on board:" in text and "Most common subject shapes" in text and "Documents (valid link" in text
     assert text.count("\n") < 120
+
+
+# ---- clearing fields: the live API answers 200 to a clear it does not understand ----
+
+
+def _ticket_with_invoice(rig):
+    rig.sync()
+    tid = pick(rig.api)
+    rig.api.put(tid, invoice=URL, engineer_id=5)
+    rig.sync()
+    assert rig.api.ticket(tid)["invoice"] == URL
+    return tid
+
+
+import pytest as _pytest  # noqa: E402
+
+
+@_pytest.mark.parametrize("mode", ["both", "null_only", "empty_only"])
+def test_clearing_a_document_works_whichever_blank_the_api_understands(rig, mode):
+    tid = _ticket_with_invoice(rig)
+    rig.api.state.clear_mode = mode
+    rig.edit(tid, "Invoice", "")
+    result = rig.sync()
+    assert result.rejected == 0 and result.errors == 0
+    assert rig.api.ticket(tid)["invoice"] in ("", None)
+    assert rig.rows()[tid]["Invoice"] == ""
+    assert rig.sync().pushed == 0  # converged
+
+
+def test_a_clear_the_api_ignores_is_rejected_and_the_sheet_shows_the_truth(rig):
+    tid = _ticket_with_invoice(rig)
+    rig.api.state.clear_mode = "none"
+    rig.edit(tid, "Invoice", "")
+    result = rig.sync()
+    assert result.rejected == 1 and result.pushed == 0
+    assert rig.api.ticket(tid)["invoice"] == URL
+    assert rig.rows()[tid]["Invoice"] == URL  # the sheet no longer claims it is blank
+    kinds = [a["Kind"] for a in rig.backend.read_table(board.ACTIVITY)]
+    assert "rejected" in kinds
+    assert rig.sync().rejected == 0  # and it does not retry forever
+
+
+def test_unassigning_an_engineer_works_with_null_and_is_rejected_when_ignored(rig):
+    tid = _ticket_with_invoice(rig)
+    rig.api.state.clear_mode = "null_only"
+    rig.edit(tid, "Engineer", "")
+    assert rig.sync().rejected == 0
+    assert rig.api.ticket(tid)["engineer_id"] is None
+
+    rig.api.put(tid, engineer_id=6)
+    rig.sync()
+    rig.api.state.clear_mode = "none"
+    rig.edit(tid, "Engineer", "")
+    result = rig.sync()
+    assert result.rejected == 1 and rig.api.ticket(tid)["engineer_id"] == 6
+    assert rig.rows()[tid]["Engineer"] == "Farhan Ali"
+
+
+def test_a_set_and_a_clear_in_one_edit_both_apply(rig):
+    tid = _ticket_with_invoice(rig)
+    rig.edit(tid, "Invoice", "")
+    rig.edit(tid, "Work Report", "https://files.fieldserve.example/wr/new.pdf")
+    result = rig.sync()
+    assert result.pushed == 2 and result.rejected == 0
+    server = rig.api.ticket(tid)
+    assert server["invoice"] in ("", None) and server["work_report"].endswith("new.pdf")

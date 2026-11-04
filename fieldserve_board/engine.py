@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 from . import board
 from .backends.base import BoardBackend, Table
-from .client import EPOCH, ApiError, FieldServeClient, format_updated_since, parse_timestamp
+from .client import EPOCH, ApiError, FieldServeClient, SharedRateLimiter, format_updated_since, parse_timestamp
 from .config import Settings
 from .extract import extract
 from .locking import file_lock
@@ -168,14 +168,19 @@ class SyncEngine:
         ordered = [i for i in order if i in rows_by_id] + new_ids
         ticket_rows = [rows_by_id[i] for i in ordered] + orphans
 
-        tables = self._tables(ticket_rows, tracked, roster, state)
-        self.backend.write_tables(tables)
-
-        self._advance_baseline(state, tracked, held, mode)
         result.operational = len(rows_by_id)
         result.noise = sum(1 for t in tracked.values() if t.noise)
         if result.created:
             self._event(events, "added", f"Added {result.created} ticket(s) to the sheet.")
+        # The Activity sheet is built from the log, so this cycle's events must be
+        # in it *before* the tables are written (otherwise it lags a sync behind).
+        state.activity.extend(events)
+        events.clear()
+
+        tables = self._tables(ticket_rows, tracked, roster, state)
+        self.backend.write_tables(tables)
+
+        self._advance_baseline(state, tracked, held, mode)
         state.checkpoint = self._checkpoint(tracked, state.checkpoint)
         result.ok = True
 
@@ -333,31 +338,35 @@ class SyncEngine:
         return merged, ticket
 
     def _send(self, ticket, fresh, accepted, final, roster, result, events):
-        """PUT the accepted fields; isolate a bad field if the batch is refused."""
+        """PUT the accepted fields.
+
+        Values are sent in one request (a refused batch is retried field by
+        field so one bad value cannot block a good one). Blanking a field is
+        sent on its own and *verified*: the live API answers 200 to a clear it
+        does not understand and leaves the value untouched.
+        """
         updated: Optional[Ticket] = None
         pending_failed: Dict[str, str] = {}
+        sets = {n: v for n, v in accepted.items() if v != ""}
+        clears = [n for n, v in accepted.items() if v == ""]
 
-        def payload(fields: Dict[str, str]) -> Dict[str, object]:
-            body: Dict[str, object] = {}
-            for name, value in fields.items():
-                body.update(board.api_payload(name, value, roster, fresh.null_fields))
-            return body
-
-        def attempt(fields: Dict[str, str]) -> Optional[Ticket]:
+        def attempt(fields: Dict[str, str]) -> None:
             nonlocal updated
             try:
-                got = self.client.update_ticket(ticket.id, payload(fields))
+                body: Dict[str, object] = {}
+                for name, value in fields.items():
+                    body.update(board.api_payload(name, value, roster))
+                got = self.client.update_ticket(ticket.id, body)
                 updated = got if got is not None else self.client.get_ticket(ticket.id)
                 result.pushed += len(fields)
                 for name in fields:
                     self._event(events, "pushed", f"{board.FIELD_TO_COLUMN[name]} -> '{fields[name]}'", ticket.id)
-                return updated
             except ApiError as exc:
                 if exc.is_rejection and len(fields) > 1:
                     for name, value in fields.items():
                         attempt({name: value})
                 elif exc.is_rejection:
-                    (name, value), = fields.items()
+                    ((name, value),) = fields.items()
                     final[name] = fresh.values[name]
                     result.rejected += 1
                     self._event(
@@ -368,9 +377,39 @@ class SyncEngine:
                         pending_failed[name] = value
                     result.errors += 1
                     self._event(events, "error", f"Push failed, will retry next sync: {exc.message}", ticket.id)
-                return None
 
-        attempt(accepted)
+        def clear(name: str) -> None:
+            nonlocal updated
+            column = board.FIELD_TO_COLUMN[name]
+            for style in board.clear_styles(name):
+                try:
+                    got = self.client.update_ticket(ticket.id, board.api_payload(name, "", roster, style))
+                    now = got if got is not None else self.client.get_ticket(ticket.id)
+                except ApiError as exc:
+                    if exc.is_rejection:
+                        continue  # this style is refused; try the next
+                    pending_failed[name] = ""
+                    result.errors += 1
+                    self._event(events, "error", f"Push failed, will retry next sync: {exc.message}", ticket.id)
+                    return
+                updated = now
+                if board.api_values(now, roster)[name] == "":
+                    result.pushed += 1
+                    self._event(events, "pushed", f"{column} cleared", ticket.id)
+                    return
+            final[name] = fresh.values[name]
+            result.rejected += 1
+            self._event(
+                events,
+                "rejected",
+                f"{column}: the API accepted the request but kept the old value, so it cannot be cleared; reverted to the server value.",
+                ticket.id,
+            )
+
+        if sets:
+            attempt(sets)
+        for name in clears:
+            clear(name)
         return updated, final, pending_failed
 
     # -- assembling output -----------------------------------------------
@@ -526,5 +565,7 @@ def build_engine(settings: Settings) -> SyncEngine:
         settings.api_key,
         requests_per_minute=settings.requests_per_minute,
         timeout=settings.http_timeout,
+        # One budget per API key, shared with the web app and any CLI run.
+        limiter=SharedRateLimiter(settings.state_path.with_suffix(".rate"), settings.requests_per_minute),
     )
     return SyncEngine(client, make_backend(settings), StateStore(settings.state_path), settings)

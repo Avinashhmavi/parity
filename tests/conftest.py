@@ -54,6 +54,7 @@ class MockServer:
         self.state.rate_limit = 100000
         self.state.requests_total = 0
         self.state.rejected_429 = 0
+        self.state.clear_mode = "both"
         if count:
             seed_tickets(self.state, count)
 

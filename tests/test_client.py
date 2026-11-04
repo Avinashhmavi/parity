@@ -151,3 +151,48 @@ def test_updated_since_has_no_microseconds():
 
     assert format_updated_since(datetime(2026, 1, 31, 1, 2, 3, 999999, tzinfo=timezone.utc)) == "2026-01-31T01:02:03Z"
     assert iso(datetime(2026, 1, 31, tzinfo=timezone.utc)) == "2026-01-31T00:00:00Z"
+
+
+# ---- the key's budget is shared across processes ----------------------------------
+
+
+def test_two_processes_share_one_window_and_never_exceed_the_limit(tmp_path):
+    from fieldserve_board.client import SharedRateLimiter
+
+    clock = FakeClock()
+    path = tmp_path / "rate.json"
+    a = SharedRateLimiter(path, 4, 60.0, clock=clock.time, sleep=clock.sleep)
+    b = SharedRateLimiter(path, 4, 60.0, clock=clock.time, sleep=clock.sleep)
+    stamps = []
+    for i in range(24):
+        (a if i % 2 else b).acquire()
+        stamps.append(clock.now)
+    for t in stamps:
+        assert len([s for s in stamps if t - 60.0 < s <= t]) <= 4
+
+
+def test_a_429_seen_by_one_process_pauses_the_other(tmp_path):
+    from fieldserve_board.client import SharedRateLimiter
+
+    clock = FakeClock()
+    path = tmp_path / "rate.json"
+    a = SharedRateLimiter(path, 50, 60.0, clock=clock.time, sleep=clock.sleep)
+    b = SharedRateLimiter(path, 50, 60.0, clock=clock.time, sleep=lambda s: None)
+    a.penalise(10)  # a sleeps 10s on the fake clock and records blocked_until
+    assert clock.slept == [10]
+    # b starts "before" the block ends on a fresh clock reading
+    clock.now -= 10
+    waits = []
+    b._sleep = lambda s: (waits.append(s), setattr(clock, "now", clock.now + s))  # noqa: SLF001
+    b.acquire()
+    assert waits and waits[0] >= 9.9
+
+
+def test_shared_limiter_survives_a_corrupt_file(tmp_path):
+    from fieldserve_board.client import SharedRateLimiter
+
+    path = tmp_path / "rate.json"
+    path.write_text("{garbage")
+    limiter = SharedRateLimiter(path, 2, 60.0)
+    limiter.acquire()
+    limiter.acquire()

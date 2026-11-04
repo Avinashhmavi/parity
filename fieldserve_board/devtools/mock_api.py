@@ -61,6 +61,9 @@ class MockState:
         self.requests_total = 0
         self.rejected_429 = 0
         self.clock_offset = 0.0
+        # How blanking is treated, to mimic APIs that answer 200 but ignore a clear:
+        # both | null_only | empty_only | none
+        self.clear_mode = "both"
 
     def now(self) -> datetime:
         return datetime.now(timezone.utc) + timedelta(seconds=self.clock_offset)
@@ -204,6 +207,14 @@ def create_app(state: Optional[MockState] = None) -> FastAPI:
                 return JSONResponse({"error": "unknown manager"}, status_code=422)
             if "status" in body and body["status"] not in (2, 3, 4, 5):
                 return JSONResponse({"error": "bad status"}, status_code=422)
+            for key, value in list(body.items()):
+                is_null, is_empty = value is None, value == ""
+                if (is_null or is_empty) and key != "status":
+                    allowed = {"both": (True, True), "null_only": (True, False), "empty_only": (False, True), "none": (False, False)}[
+                        state.clear_mode
+                    ]
+                    if (is_null and not allowed[0]) or (is_empty and not allowed[1]):
+                        body.pop(key)  # 200 OK, nothing changes: what the live API does
             ticket.update(body)
             state.touch(ticket)
             return {"ticket": dict(ticket)}
@@ -226,6 +237,11 @@ def create_app(state: Optional[MockState] = None) -> FastAPI:
             body.setdefault("created_at", iso(state.now()))
             state.tickets[body["id"]] = body
             state.touch(body)
+        return {"ok": True}
+
+    @app.post("/_admin/clear_mode/{mode}")
+    def set_clear_mode(mode: str):
+        state.clear_mode = mode
         return {"ok": True}
 
     @app.post("/_admin/limit/{limit}")

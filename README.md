@@ -121,12 +121,13 @@ Per field (`fieldserve_board/merge.py`, a pure function with its own tests):
 
 ## API limits
 
-- **Rate limit (60/min).** A sliding-window limiter spaces our own requests at 55/min (`API_REQUESTS_PER_MINUTE`). If a `429` still arrives, we sleep `Retry-After + 1` s, clear our window and retry, up to 6 times, never in a tight loop ("hammering resets the window"). Connection errors and 5xx use exponential backoff. 4xx validation errors are never retried.
+- **Rate limit (60/min).** A sliding-window limiter spaces our own requests at 50/min (`API_REQUESTS_PER_MINUTE`). The budget belongs to the API *key*, not to a process, so the window is shared through a small file in the data directory: the web app's scheduled sync, `sync.py` and the check scripts all draw on one budget, and a `429` seen by one pauses the others. (Found on the live API: separate per-process windows added up to well over 60/min.) If a `429` still arrives, we sleep `Retry-After + 1` s, clear our window and retry, up to 6 times, never in a tight loop ("hammering resets the window"). Connection errors and 5xx use exponential backoff. 4xx validation errors are never retried.
 - **Pagination cap (10 pages x 50 = 500).** A window is sorted by `updated_at` ascending. When a window comes back full, `updated_since` moves to the timestamp of its last ticket and the next window is fetched; the overlap (tickets sharing that second) is de-duplicated by id. We never request page 11. `updated_since` is sent as `YYYY-MM-DDTHH:MM:SSZ` (no microseconds).
 - **Live data.** Tickets edited mid-scan jump to the end of the ordering and could be skipped. After the scan a **catch-up** pass re-lists everything updated since just before the scan began, using the server's own clock (HTTP `Date` header) so clock skew can't hide a change.
 - **Known limit:** more than 500 tickets sharing a single `updated_at` second cannot be paged past with this API. The scan steps over that second, logs a warning and terminates rather than looping.
 - **Cost.** A full sync of ~600 tickets is about 15 requests. `python3 sync.py --incremental` lists only tickets updated since the last checkpoint (minus 60 s overlap). Full is the default because it also detects tickets that vanished (confirmed with a `GET`, and refused if dozens go missing at once, which is more likely a listing problem than deletions).
 - Each pushed ticket costs 2 requests (re-read + `PUT`), so a large batch of edits is throttled, not failed.
+- **Clearing a field.** The live API answers `200` to a `PUT` that blanks a field it does not understand and leaves the old value in place. So a clear is sent on its own, as `null` first and then as `""`, and the response is checked. If nothing works (an engineer cannot be unassigned with `null` on some APIs), the edit is refused, logged on the Activity sheet, and the cell goes back to the server's value, so the sheet never claims something the API did not accept.
 
 ## Noise
 
@@ -197,7 +198,7 @@ Without the `tls` profile the container publishes on the server's `127.0.0.1:800
 
 ```bash
 pip install -r requirements-dev.txt
-ruff check . && pytest --cov=fieldserve_board     # 147 tests: workflow, extraction, noise, merge, client, sync e2e, web, gsheets
+ruff check . && pytest --cov=fieldserve_board     # 158 tests: workflow, extraction, noise, merge, client, sync e2e, web, gsheets
 cd client && npm test && npm run build            # 6 UI helper tests + production build
 ```
 

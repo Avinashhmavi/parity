@@ -62,7 +62,7 @@ def test_settings_validate_choices_and_require_key():
     with pytest.raises(ConfigError):
         Settings.from_env({"FIELDOPS_API_KEY": "k", "BOARD_BACKEND": "numbers"})
     s = Settings.from_env({"FIELDOPS_API_KEY": "k", "FIELDOPS_BASE_URL": "http://x:1/"})
-    assert s.base_url == "http://x:1" and s.requests_per_minute == 55 and s.conflict_policy == "api"
+    assert s.base_url == "http://x:1" and s.requests_per_minute == 50 and s.conflict_policy == "api"
 
 
 def test_dotenv_never_overrides_real_environment(tmp_path):

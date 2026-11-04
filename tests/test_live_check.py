@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import pytest
+
 from fieldserve_board.devtools import live_check
 from fieldserve_board.engine import SyncEngine
 
 
-def test_live_check_passes_and_restores_the_ticket(rig, capsys, monkeypatch):
+@pytest.mark.parametrize("mode", ["both", "null_only", "empty_only"])
+def test_live_check_passes_and_restores_the_ticket(rig, capsys, mode):
+    rig.api.state.clear_mode = mode
     engine = SyncEngine(rig.client, rig.backend, rig.store, rig.settings)
     rig.sync()
     tid = live_check.pick_ticket(engine, None)

@@ -16,15 +16,19 @@ Handles the three things the API makes awkward:
 from __future__ import annotations
 
 import collections
+import json
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
 
 import requests
 
+from .locking import file_lock
 from .models import STATUS_CODES, Agent, Ticket
 
 log = logging.getLogger(__name__)
@@ -85,6 +89,69 @@ class RateLimiter:
         self._sleep(max(seconds, 0))
         with self._lock:
             self._stamps.clear()
+
+
+class SharedRateLimiter:
+    """The same sliding window, shared by every process using one API key.
+
+    The key's budget (60/min) belongs to the key, not to a process: the web
+    app's scheduled sync, ``sync.py`` and ``live_check`` all draw on it. Each
+    keeping a private window means together they exceed it and get 429s. The
+    window lives in a small JSON file guarded by a file lock; the data
+    directory is a shared volume in Docker, so containers share it too. A 429
+    seen by one process also pauses the others (``blocked_until``).
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        limit: int = 55,
+        period: float = 60.0,
+        *,
+        clock: Callable[[], float] = time.time,  # wall clock: it must agree across processes
+        sleep: Callable[[float], None] = time.sleep,
+    ):
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        self.path = Path(path)
+        self._lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        self.limit = limit
+        self.period = period
+        self._clock = clock
+        self._sleep = sleep
+
+    def _load(self) -> Dict[str, Any]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return {"stamps": [float(t) for t in data.get("stamps", [])], "blocked_until": float(data.get("blocked_until", 0))}
+        except (OSError, ValueError, TypeError):
+            return {"stamps": [], "blocked_until": 0.0}
+
+    def _save(self, data: Dict[str, Any]) -> None:
+        tmp = self.path.with_suffix(self.path.suffix + f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, self.path)
+
+    def acquire(self) -> None:
+        while True:
+            with file_lock(self._lock_path, timeout=30):
+                now = self._clock()
+                data = self._load()
+                stamps = [t for t in data["stamps"] if now - t < self.period]
+                wait = max(data["blocked_until"] - now, 0.0)
+                if not wait and len(stamps) < self.limit:
+                    stamps.append(now)
+                    self._save({"stamps": stamps, "blocked_until": 0.0})
+                    return
+                if not wait:
+                    wait = self.period - (now - stamps[0])
+            self._sleep(max(wait, 0.01))
+
+    def penalise(self, seconds: float) -> None:
+        """After a 429: nobody sharing this key sends anything for ``seconds``."""
+        with file_lock(self._lock_path, timeout=30):
+            self._save({"stamps": [], "blocked_until": self._clock() + max(seconds, 0)})
+        self._sleep(max(seconds, 0))
 
 
 def format_updated_since(value: datetime) -> str:

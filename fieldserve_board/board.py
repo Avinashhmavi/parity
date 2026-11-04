@@ -7,7 +7,7 @@ agree on what a cell means.
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 from .extract import extract
 from .models import DOCUMENT_FIELDS, EDITABLE_FIELDS, STATUS_CODES, STATUS_LABELS, Ticket
@@ -187,22 +187,35 @@ def validate_push(field: str, value: str, roster: Roster) -> Optional[str]:
     return None
 
 
-def api_payload(field: str, value: str, roster: Roster, null_fields: Sequence[str] = ()) -> Dict[str, object]:
+CLEAR_NULL = "null"  # send JSON null
+CLEAR_EMPTY = "empty"  # send ""
+
+
+def clear_styles(field: str) -> List[str]:
+    """Ways to ask the API to blank a field, in the order to try them.
+
+    The live API answers 200 to a clear it does not understand and leaves the
+    value alone, so the engine tries each style and checks the result. An
+    engineer id can only be null.
+    """
+    return [CLEAR_NULL] if field == "engineer" else [CLEAR_NULL, CLEAR_EMPTY]
+
+
+def api_payload(field: str, value: str, roster: Roster, clear_style: str = CLEAR_NULL) -> Dict[str, object]:
     """The sparse PUT body for one field."""
     if field == "status":
         return {"status": STATUS_CODES[value]}
     if field == "engineer":
         agent = roster.find(value, "engineer") if value else None
         return {"engineer_id": agent.id if agent else None}
+    blank = None if clear_style == CLEAR_NULL else ""
     if field == "manager":
         agent = roster.find(value, "manager") if value else None
         if agent:
             return {"manager": agent.name}
-        return {"manager": None if "manager" in null_fields or not value else value}
+        return {"manager": value if value else blank}
     if field in DOCUMENT_FIELDS:
-        if not value and field in null_fields:
-            return {field: None}
-        return {field: value}
+        return {field: value if value else blank}
     raise KeyError(field)
 
 

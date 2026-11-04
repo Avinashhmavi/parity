@@ -83,7 +83,7 @@ class Settings:
             ),
             # The server allows 60/min; stay under it so we never trip the
             # "hammering resets the window" behaviour.
-            requests_per_minute=int(get("API_REQUESTS_PER_MINUTE") or 55),
+            requests_per_minute=int(get("API_REQUESTS_PER_MINUTE") or 50),
             http_timeout=float(get("API_TIMEOUT_SECONDS") or 20),
             google_sheet_id=(get("GOOGLE_SHEET_ID") or "").strip(),
             google_credentials=(get("GOOGLE_SERVICE_ACCOUNT") or "").strip(),
