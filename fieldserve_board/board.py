@@ -92,15 +92,16 @@ def api_values(ticket: Ticket, roster: Roster) -> Dict[str, str]:
 
 def view_of(ticket_id: int, values: Mapping[str, str], roster: Roster) -> TicketView:
     c = lambda f: canon(f, values.get(f, ""), roster)  # noqa: E731
+    raw = lambda f: values.get(f, "") or ""  # noqa: E731  (documents and manager: exactly as served)
     return TicketView(
         id=ticket_id,
         status=c("status"),
         engineer=c("engineer"),
-        manager=values.get("manager", "").strip(),
-        purchase_order=c("purchase_order"),
-        delivery_note=c("delivery_note"),
-        work_report=c("work_report"),
-        invoice=c("invoice"),
+        manager=raw("manager"),
+        purchase_order=raw("purchase_order"),
+        delivery_note=raw("delivery_note"),
+        work_report=raw("work_report"),
+        invoice=raw("invoice"),
     )
 
 
@@ -143,6 +144,14 @@ def row_values(row: Mapping[str, str], roster: Roster) -> Dict[str, str]:
     return {f: canon(f, row.get(FIELD_TO_COLUMN[f], ""), roster) for f in FIELDS}
 
 
+def evaluation_values(row: Mapping[str, str], roster: Roster) -> Dict[str, str]:
+    """Field values for *evaluating* a sheet row: names and status tolerant, text exact."""
+    values = {f: row.get(FIELD_TO_COLUMN[f], "") or "" for f in FIELDS}
+    for f in ("status", "engineer"):
+        values[f] = canon(f, values[f], roster)
+    return values
+
+
 def parse_ticket_id(text: str) -> Optional[int]:
     raw = (text or "").strip()
     if raw.endswith(".0"):
@@ -161,7 +170,7 @@ def derived_edits(rows: Iterable[Mapping[str, str]], roster: Roster) -> List[Edi
         ticket_id = parse_ticket_id(row.get("Ticket ID", ""))
         if ticket_id is None:
             continue
-        evaluation = evaluate_values(ticket_id, row_values(row, roster), roster)
+        evaluation = evaluate_values(ticket_id, evaluation_values(row, roster), roster)
         for column, value in (
             ("Stage", evaluation.stage),
             ("Action Owner", evaluation.action_owner),

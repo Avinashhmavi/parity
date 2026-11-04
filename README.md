@@ -47,6 +47,17 @@ No real API key? `python -m fieldserve_board.devtools.mock_api --port 8377 --key
 
 The grader contract is in [`submission.json`](submission.json): `python3 sync.py` and `python3 sheet.py`, both run from the repo root with `FIELDOPS_BASE_URL` / `FIELDOPS_API_KEY` in the environment.
 
+## Using the board (for people who have never seen it)
+
+The web page is written for someone opening it for the first time, in plain words and in a light theme only:
+
+- **Home** says where things stand in one sentence, then who has the most work waiting and how many jobs sit at each of the six steps. Every number is a button.
+- **All Jobs** lists each job with a sentence such as "Nefo Zagi needs to get the customer's Purchase Order", a six-dot progress bar and, when something is wrong, the problem in plain words. Search and four simple filters narrow it down.
+- **Needs a Look** shows only jobs with a problem (a Closed job still missing its Invoice, a "will upload" typed where a link belongs) and says how to fix each.
+- **People** lists everyone grouped by what they do, with how many jobs wait on each.
+- **History** shows what was sent to FieldServe, changes that clashed (and which version was kept), and which emails were ignored as spam or automatic alerts.
+- A first-visit guide explains the six steps and the words used; the **Help** button reopens it. Opening a job shows its checklist and one form with one **Save changes** button, which saves to the sheet and sends it to FieldServe straight away. A **Not needed** button fills in the exact waiver text `NA`.
+
 ## The sheet
 
 `Tickets` has the 11 required columns, named exactly, plus extras (extras are never judged):
@@ -185,12 +196,12 @@ Afterwards, on the server (`ssh ... 'cd fieldserve-board && bash deploy/<script>
 - `deploy/report.sh`: a compact data-quality report (counts and samples) for tuning the noise and extraction rules on the real data.
 - `deploy/live-check.sh`: verifies the **write** path against the real API by temporarily changing one ticket (document, status, engineer, both-sides-at-once, same-field conflict) and restoring it. Only run it on a dataset you may modify.
 
-**HTTPS address.** From an `ec2-A-B-C-D…` hostname or a bare IP, `deploy.sh` derives `A-B-C-D.sslip.io` (sslip.io resolves that name to the IP, so there is no DNS to set up), writes `DOMAIN` and `COMPOSE_PROFILES=tls` to the server's `.env`, and starts a Caddy container that obtains and renews a Let's Encrypt certificate. Then open `https://13-233-251-144.sslip.io` (user `board`). Requirements and caveats:
+**HTTPS address.** From an `ec2-A-B-C-D…` hostname or a bare IP, `deploy.sh` derives `A-B-C-D.sslip.io` (sslip.io resolves that name to the IP, so there is no DNS to set up), writes `DOMAIN` and `COMPOSE_PROFILES=tls` to the server's `.env`, and starts a Caddy container that obtains and renews a Let's Encrypt certificate. Then open `https://13-233-251-144.sslip.io`. Requirements and caveats:
 
 - The instance's **Security Group must allow inbound TCP 80 and 443** from `0.0.0.0/0` (EC2, Instances, Security, Edit inbound rules). Without that the browser shows "refused" or times out.
 - A public IP that changes when the instance is stopped and started changes the name; attach an Elastic IP to keep it stable.
 - sslip.io is a shared domain, so Let's Encrypt rate limits can occasionally apply; Caddy falls back to another certificate authority automatically. For anything lasting, use your own domain: `DEPLOY_DOMAIN=board.example.com deploy/deploy.sh key.pem` (point an A record at the server first). `DEPLOY_DOMAIN=none` keeps it tunnel-only.
-- The login throttles failed attempts: 10 wrong passwords from one address locks it out for 5 minutes.
+- **Login.** While testing, `deploy.sh` leaves the login **off** (the page shows a "Test mode" bar, and anyone with the link can view and change the board). Turn it on with `BOARD_LOGIN=on deploy/deploy.sh key.pem`; it then asks for a password (user `board`) and throttles failed attempts (10 wrong passwords from one address locks it out for 5 minutes). From your own machine, `deploy/check-live.sh` checks the whole public site end to end.
 
 Without the `tls` profile the container publishes on the server's `127.0.0.1:8000` only; reach it with `ssh -i key -L 8000:127.0.0.1:8000 ubuntu@host` and open `http://localhost:8000`.
 
@@ -198,7 +209,7 @@ Without the `tls` profile the container publishes on the server's `127.0.0.1:800
 
 ```bash
 pip install -r requirements-dev.txt
-ruff check . && pytest --cov=fieldserve_board     # 158 tests: workflow, extraction, noise, merge, client, sync e2e, web, gsheets
+ruff check . && pytest --cov=fieldserve_board     # 189 tests: workflow, extraction, noise, merge, client, sync e2e, web, gsheets
 cd client && npm test && npm run build            # 6 UI helper tests + production build
 ```
 

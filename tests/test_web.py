@@ -29,6 +29,10 @@ def wait_idle(client, timeout=20):
     raise AssertionError("sync did not finish")
 
 
+def test_health_says_whether_a_login_is_required(client):
+    assert client.get("/api/health").json()["loginRequired"] is False
+
+
 def test_health(client):
     body = client.get("/api/health").json()
     assert body["status"] == "ok" and body["canSync"] and body["lastSync"]["ok"]

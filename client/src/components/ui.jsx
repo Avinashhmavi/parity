@@ -1,52 +1,73 @@
-import { stageIndex, STAGES } from '../lib.js'
+import { STAGES, stageIndex, stepLabel, STATUS_TEXT } from '../lib.js'
 
-export function Chip({ tone, children }) {
+const STATUS_TONE = { Open: 'blue', Pending: 'amber', Resolved: 'green', Closed: 'grey' }
+export function StatusChip({ status }) {
+  if (!status) return null
   return (
-    <span className="chip" data-tone={tone}>
-      {children}
+    <span className="chip" data-tone={STATUS_TONE[status] ?? 'grey'} title={STATUS_TEXT[status] ?? status}>
+      {status}
     </span>
   )
 }
 
-const STATUS_TONE = { Open: 'accent', Pending: 'warn', Resolved: 'ok', Closed: '' }
-export function StatusChip({ status }) {
-  if (!status) return <span className="muted">{'—'}</span>
-  return <Chip tone={STATUS_TONE[status]}>{status}</Chip>
-}
-
-/** Six segments, one per workflow step: done, current, not reached. */
-export function Progress({ stage }) {
+/** Six dots, one per step: done, current, still to come. */
+export function StepDots({ stage, withLabel = true }) {
   const at = stageIndex(stage)
   return (
-    <span className="progress" role="img" aria-label={stage === 'Done' ? 'All six steps complete' : `Step ${at + 1} of 6: ${stage}`}>
-      {STAGES.map((name, i) => (
-        <i key={name} data-s={i < at ? 'done' : i === at ? 'now' : 'todo'} />
-      ))}
+    <span className="steps-inline">
+      <span className="dots" role="img" aria-label={stepLabel(stage)}>
+        {STAGES.map((name, i) => (
+          <i key={name} data-s={i < at ? 'done' : i === at ? 'now' : 'todo'} />
+        ))}
+      </span>
+      {withLabel && <span className="steps-label">{stepLabel(stage)}</span>}
     </span>
   )
 }
 
-const DOC_TONE = { url: 'ok', waived: 'ok', junk: 'bad', empty: '' }
-const DOC_LABEL = { url: 'Link', waived: 'Waived', junk: 'Not a link', empty: 'Missing' }
+const DOC_TEXT = {
+  url: { tone: 'green', label: 'Link added' },
+  waived: { tone: 'green', label: 'Not needed' },
+  junk: { tone: 'red', label: 'Not a link' },
+  empty: { tone: 'grey', label: 'Missing' }
+}
 export function DocChip({ state }) {
-  return <Chip tone={DOC_TONE[state]}>{DOC_LABEL[state] ?? state}</Chip>
+  const d = DOC_TEXT[state] ?? DOC_TEXT.empty
+  return (
+    <span className="chip" data-tone={d.tone}>
+      {d.label}
+    </span>
+  )
 }
 
-export function Empty({ title, children }) {
+export function Empty({ title, children, action }) {
   return (
     <div className="empty" role="status">
       <strong>{title}</strong>
-      <span>{children}</span>
+      {children && <p>{children}</p>}
+      {action}
     </div>
   )
 }
 
-export function Skeleton({ rows = 8 }) {
+export function Skeleton({ rows = 5 }) {
   return (
-    <div aria-hidden="true" style={{ display: 'grid', gap: '0.6rem', padding: '1rem' }}>
+    <div className="skeletons" aria-hidden="true">
       {Array.from({ length: rows }, (_, i) => (
-        <div key={i} className="skeleton" style={{ height: '2.4rem', opacity: 1 - i * 0.08 }} />
+        <div key={i} className="skeleton" />
       ))}
+    </div>
+  )
+}
+
+export function Notice({ tone = 'blue', title, children, icon }) {
+  return (
+    <div className="notice" data-tone={tone} role={tone === 'red' ? 'alert' : 'status'}>
+      {icon}
+      <div>
+        {title && <strong>{title}</strong>}
+        {children && <div>{children}</div>}
+      </div>
     </div>
   )
 }

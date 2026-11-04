@@ -158,7 +158,7 @@ class BoardService:
         state = self.store.load()
         base = state.baseline.get(str(ticket_id), {}).get("values")
         item = self._item(row, base, snap.roster)
-        evaluation = evaluate(board.view_of(ticket_id, board.row_values(row, snap.roster), snap.roster), snap.roster)
+        evaluation = evaluate(board.view_of(ticket_id, board.evaluation_values(row, snap.roster), snap.roster), snap.roster)
         item["steps"] = [
             {"key": s.key, "label": s.label, "status": s.status.value, "owner": s.owner, "detail": s.detail} for s in evaluation.steps
         ]

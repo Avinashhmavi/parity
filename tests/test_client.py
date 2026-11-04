@@ -140,7 +140,7 @@ def test_requester_email_is_found_in_the_common_shapes(raw):
 
 def test_custom_fields_envelope_and_nulls_are_understood():
     t = parse_ticket({"id": 3, "status": "4", "engineer_id": None, "custom_fields": {"manager": " Ann ", "invoice": None}})
-    assert (t.id, t.status, t.engineer_id, t.manager) == (3, 4, None, "Ann")
+    assert (t.id, t.status, t.engineer_id, t.manager) == (3, 4, None, " Ann ")  # served text is kept as served
     assert "invoice" in t.null_fields
 
 

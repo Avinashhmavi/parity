@@ -47,14 +47,14 @@ def classify_document(value: Optional[str]) -> DocState:
     as a document. Whether ``NA`` is *accepted* depends on the document, see
     :data:`STEPS`; this function only says what the text is.
     """
+    if value == WAIVER:  # exactly "NA": no case folding, no trimming
+        return DocState.WAIVED
     text = (value or "").strip()
     if not text:
         return DocState.EMPTY
-    if text == WAIVER:
-        return DocState.WAIVED
     if _is_url(text):
         return DocState.URL
-    return DocState.JUNK
+    return DocState.JUNK  # includes "na", "N/A", "NA " and " NA"
 
 
 def _is_url(text: str) -> bool:

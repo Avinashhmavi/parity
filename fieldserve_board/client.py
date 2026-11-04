@@ -232,11 +232,13 @@ def parse_ticket(raw: dict) -> Ticket:
         subject=_text(raw.get("subject")),
         status=_int_or_none(raw.get("status")),
         engineer_id=_int_or_none(pick("engineer_id")),
-        manager=_text(pick("manager")).strip(),
-        purchase_order=_text(pick("purchase_order")).strip(),
-        delivery_note=_text(pick("delivery_note")).strip(),
-        work_report=_text(pick("work_report")).strip(),
-        invoice=_text(pick("invoice")).strip(),
+        # Served text is kept exactly: the waiver is the *exact* text NA, so " NA" or
+        # "NA " must stay visible as junk rather than be tidied into a waiver.
+        manager=_text(pick("manager")),
+        purchase_order=_text(pick("purchase_order")),
+        delivery_note=_text(pick("delivery_note")),
+        work_report=_text(pick("work_report")),
+        invoice=_text(pick("invoice")),
         updated_at=_text(raw.get("updated_at")),
         created_at=_text(raw.get("created_at")),
         requester_email=_text(email).strip(),

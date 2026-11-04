@@ -457,7 +457,7 @@ class SyncEngine:
                     held[ticket_id].add(name)
                     self._event(events, "held", f"{column} was edited during the sync; kept your edit for the next one.", ticket_id)
             if held[ticket_id]:
-                evaluation = board.evaluate_values(ticket_id, board.row_values(row, roster), roster)
+                evaluation = board.evaluate_values(ticket_id, board.evaluation_values(row, roster), roster)
                 row.update({"Stage": evaluation.stage, "Action Owner": evaluation.action_owner, "Integrity": evaluation.integrity})
         return rows, held
 

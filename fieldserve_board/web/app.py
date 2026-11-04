@@ -219,6 +219,7 @@ def create_app(
             "canSync": service.engine is not None,
             "syncing": sync_lock.locked(),
             "conflictPolicy": settings.conflict_policy,
+            "loginRequired": bool(settings.access_password),
             "autoSyncSeconds": settings.sync_interval_seconds,
             **info,
         }

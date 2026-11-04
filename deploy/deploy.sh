@@ -47,20 +47,38 @@ echo "==> uploading $(git rev-parse --short HEAD)"
 "${SSH[@]}" "mkdir -p ~/$APP_DIR"
 git archive --format=tar HEAD | "${SSH[@]}" "tar -x -C ~/$APP_DIR"
 
+# Login. Default is OFF while you are testing: anyone with the URL can then view
+# and edit the board. Turn it on with:  BOARD_LOGIN=on deploy/deploy.sh <key.pem>
+BOARD_LOGIN="${BOARD_LOGIN:-off}"
+
 if "${SSH[@]}" "test -f ~/$APP_DIR/.env"; then
   echo "==> keeping the existing .env on the server (delete it there to re-enter secrets)"
 else
   read -r -s -p "FieldServe API key: " API_KEY; echo
-  read -r -s -p "Board password (blank = generate one): " BOARD_PW; echo
-  if [ -z "$BOARD_PW" ]; then
-    # head closes the pipe early, which makes tr exit 141; "|| true" keeps pipefail from aborting.
-    BOARD_PW="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24 || true)"
-    echo "generated board password (shown once): $BOARD_PW"
-  fi
-  printf 'FIELDOPS_BASE_URL=%s\nFIELDOPS_API_KEY=%s\nBOARD_USER=board\nBOARD_PASSWORD=%s\nCONFLICT_POLICY=api\nTRUSTED_EMAIL_DOMAINS=omnimart.example\n' \
-    "$API_URL" "$API_KEY" "$BOARD_PW" |
+  printf 'FIELDOPS_BASE_URL=%s\nFIELDOPS_API_KEY=%s\nBOARD_USER=board\nBOARD_PASSWORD=\nCONFLICT_POLICY=api\nTRUSTED_EMAIL_DOMAINS=omnimart.example\n' \
+    "$API_URL" "$API_KEY" |
     "${SSH[@]}" "umask 077 && cat > ~/$APP_DIR/.env"
-  unset API_KEY BOARD_PW
+  unset API_KEY
+fi
+
+if [ "$BOARD_LOGIN" = "on" ]; then
+  # Keep a password that already exists; otherwise ask for one (blank = generate).
+  if ! "${SSH[@]}" "grep -qE '^BOARD_PASSWORD=.+' ~/$APP_DIR/.env"; then
+    read -r -s -p "Board password (blank = generate one): " BOARD_PW; echo
+    if [ -z "$BOARD_PW" ]; then
+      # head closes the pipe early, which makes tr exit 141; "|| true" keeps pipefail from aborting.
+      BOARD_PW="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24 || true)"
+      echo "generated board password (shown once): $BOARD_PW"
+    fi
+    printf '%s\n' "$BOARD_PW" | "${SSH[@]}" "cd ~/$APP_DIR && read -r PW && sed -i '/^BOARD_PASSWORD=/d' .env && printf 'BOARD_PASSWORD=%s\n' \"\$PW\" >> .env"
+    unset BOARD_PW
+  else
+    echo "==> login stays ON (password already set on the server)"
+  fi
+else
+  "${SSH[@]}" "cd ~/$APP_DIR && sed -i '/^BOARD_PASSWORD=/d' .env && echo 'BOARD_PASSWORD=' >> .env"
+  echo "==> TEST MODE: the login is OFF. Anyone with the URL can view and edit this board."
+  echo "    Turn it back on any time with:  BOARD_LOGIN=on deploy/deploy.sh $KEY"
 fi
 
 # Keep DOMAIN / COMPOSE_PROFILES in the server's .env in step with this run.
@@ -79,7 +97,7 @@ echo "==> verifying (this talks to the REAL FieldServe API from the VPS)"
 if [ "$DEPLOY_DOMAIN" != "none" ]; then
 cat <<MSG
 
-Done. Open  https://$DEPLOY_DOMAIN   (user: board, password: the one you set)
+Done. Open  https://$DEPLOY_DOMAIN   (test mode: no login unless you deployed with BOARD_LOGIN=on)
 
 If the page does not load, the AWS Security Group must allow inbound TCP 80 and
 443 from anywhere (EC2 > Instances > your instance > Security > Edit inbound rules).

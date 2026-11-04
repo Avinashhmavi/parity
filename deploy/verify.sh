@@ -36,12 +36,12 @@ else
   echo "no DOMAIN set: the app is only reachable through an SSH tunnel"
 fi
 
-step "login is enforced"
+step "login"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/api/board)
 if grep -q '^BOARD_PASSWORD=.\+' .env 2>/dev/null; then
   [ "$CODE" = 401 ] && echo "ok: /api/board without credentials -> 401" || fail "expected 401 without credentials, got $CODE"
 else
-  echo "warning: BOARD_PASSWORD is empty, the board has no login (got $CODE)"
+  echo "TEST MODE: the login is off (BOARD_PASSWORD is empty); /api/board answered $CODE. Turn it on with BOARD_LOGIN=on deploy/deploy.sh <key>"
 fi
 
 step "can the server reach the real FieldServe API? (response shapes, truncated)"

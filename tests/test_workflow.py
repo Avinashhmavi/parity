@@ -31,6 +31,10 @@ def view(**kw):
         (None, DocState.EMPTY),
         ("   ", DocState.EMPTY),
         ("NA", DocState.WAIVED),
+        ("NA ", DocState.JUNK),  # the waiver is the EXACT text NA
+        (" NA", DocState.JUNK),
+        ("Na", DocState.JUNK),
+        ("n/a", DocState.JUNK),
         ("done", DocState.JUNK),
         ("asked Ravi", DocState.JUNK),
         ("ok", DocState.JUNK),
