@@ -43,6 +43,7 @@ export const api = {
   board: (params, signal) => request(`/board${qs(params)}`, { signal }),
   ticket: (id, signal) => request(`/tickets/${id}`, { signal }),
   edit: (id, changes, sync = false) => request(`/tickets/${id}${qs({ sync })}`, { method: 'PATCH', body: changes }),
+  syncStatus: () => request('/sync'),
   startSync: () => request('/sync', { method: 'POST' }),
   conflicts: signal => request('/conflicts', { signal }),
   activity: signal => request('/activity', { signal }),

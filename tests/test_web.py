@@ -118,3 +118,53 @@ def test_noise_conflicts_activity_endpoints(client):
     assert isinstance(client.get("/api/noise").json(), list)
     assert isinstance(client.get("/api/conflicts").json(), list)
     assert client.get("/api/activity").json()[0]["kind"] in {"added", "ignored", "warning", "removed"}
+
+
+# ---- access control ---------------------------------------------------------
+
+
+def _locked(rig, **extra):
+    from fieldserve_board.config import Settings
+
+    settings = Settings.from_env(
+        {
+            "FIELDOPS_BASE_URL": rig.settings.base_url,
+            "FIELDOPS_API_KEY": "fk_test",
+            "BOARD_XLSX_PATH": str(rig.xlsx),
+            "BOARD_STATE_PATH": str(rig.settings.state_path),
+            "BOARD_PASSWORD": "s3cret pass",
+            "BOARD_USER": "ops",
+            **extra,
+        }
+    )
+    rig.sync()
+    service = BoardService(settings, rig.backend, rig.store, rig.engine)
+    return TestClient(create_app(service=service))
+
+
+def test_password_protects_api_ui_and_websocket(rig):
+    import base64
+
+    good = {"Authorization": "Basic " + base64.b64encode(b"ops:s3cret pass").decode()}
+    bad = {"Authorization": "Basic " + base64.b64encode(b"ops:wrong").decode()}
+    with _locked(rig) as c:
+        assert c.get("/api/live").json() == {"status": "ok"}  # liveness stays open
+        for path in ("/api/board", "/api/summary", "/api/health", "/api/tickets/101"):
+            r = c.get(path)
+            assert r.status_code == 401 and "Basic" in r.headers["www-authenticate"], path
+            assert c.get(path, headers=bad).status_code == 401
+            assert c.get(path, headers=good).status_code == 200, path
+        assert c.patch("/api/tickets/101", json={"manager": "Dev Malhotra"}).status_code == 401
+        assert c.post("/api/sync").status_code == 401
+        from starlette.websockets import WebSocketDisconnect
+
+        with pytest.raises(WebSocketDisconnect), c.websocket_connect("/ws"):
+            pass
+        with c.websocket_connect("/ws", headers=good) as ws:
+            assert ws.receive_json()["type"] == "hello"
+
+
+def test_garbage_authorization_headers_are_rejected_not_crashed(rig):
+    with _locked(rig) as c:
+        for header in ("Basic", "Basic !!!notbase64", "Bearer abc", "Basic " + "A" * 10):
+            assert c.get("/api/board", headers={"Authorization": header}).status_code == 401

@@ -151,7 +151,7 @@ The heuristics were written from the brief's description, not from the real data
 - `Status`, `Engineer` and `Manager` cells have dropdowns (warning-style, so a human can still type) fed from the live roster.
 - **Google Sheets** is a second backend behind the same three-method interface (`BoardBackend`). It is exercised by running the full sync engine through an in-memory fake of gspread; it has **not** been run against live Google. Setup is in `.env.example`.
 - State is one JSON file written atomically, plus a file lock so `sync`, `export`, `apply` and the web app never interleave.
-- The web app has no authentication and binds to localhost: it is an operations console, not an internet service. Put it behind your own auth before exposing it.
+- The web app has **optional HTTP Basic login** (`BOARD_USER`/`BOARD_PASSWORD`, constant-time compare, covers the API, the UI and the websocket; only `/api/live` is open, for Docker health checks). With no password set it logs a warning and should only be used on localhost. Basic auth sends credentials in clear text over plain HTTP, so on a server keep it bound to localhost and reach it through an SSH tunnel, or put TLS in front of it.
 - Cut consciously: no per-field audit history beyond `Conflicts`/`Activity`; no webhook-driven (push) syncing; no multi-user presence.
 
 ## Assumptions
@@ -162,6 +162,18 @@ The heuristics were written from the brief's description, not from the real data
 4. "Finance" is a single shared mailbox: the first Finance agent by name.
 5. `manager` on a ticket is compared case-insensitively to roster managers; Action Owner shows the roster spelling.
 6. If fewer than two coordinators exist, the coordinator rule falls back to the only one.
+
+## Deploying to a VPS
+
+`deploy/deploy.sh` ships the committed repo over ssh and starts the Docker stack; `deploy/verify.sh` then proves it works against the **real** API from the server. Run it from your own machine:
+
+```bash
+deploy/deploy.sh ~/keys/test.pem          # DEPLOY_HOST=ubuntu@host to override the target
+```
+
+It installs Docker if missing, uploads `git archive HEAD` (so no local secrets or untracked files travel), asks for the FieldServe key and a board password and writes them to `.env` **on the server** over ssh stdin (never on a command line or in the repo), builds, starts, and runs `verify.sh`, which checks the web app is up, the login is enforced, prints the API's real response shapes (`sync.py --probe`), runs one full sync, and prints the per-person summary.
+
+The container publishes on the server's `127.0.0.1:8000` only. Reach it with `ssh -i key -L 8000:127.0.0.1:8000 ubuntu@host` and open `http://localhost:8000`.
 
 ## Tests
 
@@ -179,4 +191,4 @@ The end-to-end tests run the real engine over real HTTP against the mock API and
 2. Run the Google backend against a real spreadsheet.
 3. Live formulas for Stage/Owner in a second sheet view for people editing in Excel, kept consistent with the Python rules by a test that recalculates in LibreOffice.
 4. Sync on change instead of on a timer: the API offers no webhook or ETag, so ask its owners for one rather than polling harder against a 60/min budget.
-5. Authentication in front of the web app, and per-user attribution of edits.
+5. Per-user accounts and attribution of edits (today there is one shared login), and TLS termination in the stack.

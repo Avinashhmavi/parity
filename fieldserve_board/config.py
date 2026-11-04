@@ -46,6 +46,8 @@ class Settings:
     google_sheet_id: str
     google_credentials: str
     sync_interval_seconds: int
+    access_user: str = "board"
+    access_password: str = ""
 
     @classmethod
     def from_env(cls, environ: Optional[Mapping[str, str]] = None, *, require_key: bool = True) -> Settings:
@@ -86,4 +88,6 @@ class Settings:
             google_sheet_id=(get("GOOGLE_SHEET_ID") or "").strip(),
             google_credentials=(get("GOOGLE_SERVICE_ACCOUNT") or "").strip(),
             sync_interval_seconds=int(get("SYNC_INTERVAL_SECONDS") or 0),
+            access_user=(get("BOARD_USER") or "board").strip(),
+            access_password=get("BOARD_PASSWORD") or "",
         )

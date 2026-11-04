@@ -36,6 +36,24 @@ export default function App() {
     if (health.data) setSyncing(health.data.syncing)
   }, [health.data])
 
+  // Belt and braces: if the socket is unavailable (a proxy, a login prompt), poll
+  // until the running sync is over so the UI can never stay stuck on "Syncing".
+  useEffect(() => {
+    if (!syncing) return undefined
+    const timer = setInterval(async () => {
+      try {
+        const status = await api.syncStatus()
+        if (!status.syncing) {
+          setSyncing(false)
+          refresh()
+        }
+      } catch {
+        /* keep polling */
+      }
+    }, 2500)
+    return () => clearInterval(timer)
+  }, [syncing, refresh])
+
   useServerEvents(event => {
     if (event.type === 'sync.started') setSyncing(true)
     if (event.type === 'sync.finished') {

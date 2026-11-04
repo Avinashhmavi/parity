@@ -7,15 +7,17 @@ operations console. Put it behind your own auth before exposing it.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import logging
 import os
+import secrets
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
@@ -42,6 +44,18 @@ class EditBody(BaseModel):
     delivery_note: Optional[str] = None
     work_report: Optional[str] = None
     invoice: Optional[str] = None
+
+
+def basic_auth_ok(header: Optional[str], user: str, password: str) -> bool:
+    """Constant-time check of an ``Authorization: Basic`` header."""
+    if not header or not header.lower().startswith("basic "):
+        return False
+    try:
+        supplied = base64.b64decode(header[6:].strip(), validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    expected = f"{user}:{password}"
+    return secrets.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
 
 
 class Hub:
@@ -115,20 +129,31 @@ def create_app(settings: Optional[Settings] = None, service: Optional[BoardServi
             task.cancel()
 
     app = FastAPI(title="FieldServe Ticket Board", version="1.0.0", lifespan=lifespan)
+    if settings.access_password:
+
+        @app.middleware("http")
+        async def require_login(request: Request, call_next):
+            # /api/live is the only open route: a bare liveness probe for Docker.
+            if request.url.path == "/api/live" or basic_auth_ok(request.headers.get("authorization"), settings.access_user, settings.access_password):
+                return await call_next(request)
+            return Response("Authentication required", status_code=401, headers={"WWW-Authenticate": 'Basic realm="FieldServe Board", charset="UTF-8"'})
+    else:
+        log.warning("BOARD_PASSWORD is not set: the board has no login. Only expose it on localhost or behind your own auth.")
+
     origins = [o for o in (os.environ.get("CORS_ORIGINS") or "http://localhost:5173,http://127.0.0.1:5173").split(",") if o]
     app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST", "PATCH"], allow_headers=["*"])
 
     @app.exception_handler(NotFound)
     async def _not_found(_req, exc: NotFound):
-        from fastapi.responses import JSONResponse
-
         return JSONResponse({"detail": str(exc)}, status_code=404)
 
     @app.exception_handler(ValidationError)
     async def _invalid(_req, exc: ValidationError):
-        from fastapi.responses import JSONResponse
-
         return JSONResponse({"detail": str(exc)}, status_code=422)
+
+    @app.get("/api/live")
+    def live() -> Dict[str, str]:
+        return {"status": "ok"}
 
     @app.get("/api/health")
     def health() -> Dict[str, Any]:
@@ -223,6 +248,10 @@ def create_app(settings: Optional[Settings] = None, service: Optional[BoardServi
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:
+        # The HTTP middleware does not see websocket handshakes, so check here.
+        if settings.access_password and not basic_auth_ok(socket.headers.get("authorization"), settings.access_user, settings.access_password):
+            await socket.close(code=4401)
+            return
         await hub.connect(socket)
         try:
             await socket.send_json({"type": "hello", "syncing": sync_lock.locked()})
