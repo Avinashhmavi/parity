@@ -42,6 +42,6 @@ for p in s["workload"][:6]:
     print(f"        {p['pending']:>5}  {p['person']} ({p['role']})")
 sys.exit(0 if last.get("ok") and t["tickets"] > 0 else 1)
 PY
-[ $? -eq 0 ] && ok=$((ok+3)) || bad=$((bad+1))
+[ $? -eq 0 ] && ok=$((ok+4)) || bad=$((bad+1))  # the block above prints 4 PASS/FAIL lines
 echo; echo "$ok checks passed, $bad failed"
 [ "$bad" -eq 0 ]
